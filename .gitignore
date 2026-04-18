@@ -1,0 +1,21 @@
+# 用户配置与个人素材
+config.json
+resume.md
+resume.pdf
+resume.txt
+resume.docx
+
+# 投递日志
+*-log.json
+
+# Python
+__pycache__/
+*.pyc
+.ruff_cache/
+
+# 浏览器 / 爬虫临时目录
+.playwright-cli/
+chrome-debug/
+
+# macOS
+.DS_Store

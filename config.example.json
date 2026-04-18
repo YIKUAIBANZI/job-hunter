@@ -1,0 +1,10 @@
+{
+  "resume_path": "./resume.md",
+  "greeting": "您好，我对贵司岗位非常感兴趣，期待进一步沟通！",
+  "skills": ["Python", "React", "项目管理", "数据分析"],
+  "target_roles": ["产品经理", "前端工程师"],
+  "exclude_keywords": ["总监", "架构师", "首席", "VP", "P8", "P7"],
+  "boost_keywords": ["llm", "大模型", "agent", "rag", "gpt", "ai产品", "人工智能"],
+  "min_score": 60,
+  "default_count": 20
+}
