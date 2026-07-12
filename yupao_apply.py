@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """鱼泡直聘自动投递脚本（DrissionPage版）"""
 
-import argparse
 import json
 import time
 from pathlib import Path
 from urllib.parse import quote
 
-from DrissionPage import ChromiumPage, ChromiumOptions
-
-from shared import load_log, save_log, score_jd
+from shared import (
+    connect_chrome,
+    dedup_key,
+    load_applied_index,
+    load_config,
+    load_log,
+    parse_common_args,
+    print_summary,
+    record,
+    score_jd,
+)
 
 
 CITY_CODES = {
@@ -63,22 +70,6 @@ CITY_CODES = {
     "宁波": "a388c0",
     "温州": "a391c0",
 }
-
-
-def parse_args(cfg: dict):
-    p = argparse.ArgumentParser()
-    p.add_argument("--job", required=True, help="搜索岗位名，如 '产品经理实习'")
-    p.add_argument(
-        "--city", default="全国", help=f"城市：{'/'.join(CITY_CODES.keys())}"
-    )
-    p.add_argument("--count", type=int, default=cfg["default_count"], help="投递数量")
-    p.add_argument(
-        "--min-score",
-        type=int,
-        default=cfg["min_score"],
-        help="最低评分（0=全投不过滤，默认从 config.json 读取）",
-    )
-    return p.parse_args()
 
 
 def get_card_titles(page) -> list[str]:
@@ -177,13 +168,18 @@ def scroll_for_more(page, current_count: int) -> int:
 
 def main():
     cfg = load_config()
-    args = parse_args(cfg)
+    args = parse_common_args(
+        CITY_CODES,
+        default_count=cfg["default_count"],
+        default_min_score=cfg["min_score"],
+    )
     target_count = args.count
     city_code = CITY_CODES.get(args.city, "a1c0")
     search_url = f"https://www.yupao.com/topic/{city_code}/?keywords={quote(args.job)}"
     log_file = Path(__file__).parent / f"yupao-{args.job[:10]}-log.json"
 
     log = load_log(log_file)
+    applied_index = load_applied_index()
     seen_titles = set(
         e.get("job", "") for e in log.get("applied", []) + log.get("skipped", [])
     )
@@ -195,8 +191,7 @@ def main():
         f"🎯 鱼泡直聘 | 岗位: {args.job} | 城市: {args.city} | 目标: {target_count} 份"
     )
     print("🔗 连接 Chrome（端口 9222）...")
-    opts = ChromiumOptions().set_local_port(9222)
-    page = ChromiumPage(addr_or_opts=opts)
+    page = connect_chrome()
     page = page.new_tab(search_url)
     time.sleep(6)
 
@@ -226,6 +221,19 @@ def main():
                 break
             seen_titles.add(title)
 
+            # 鱼泡左列表卡片不含公司名 → 只能按标题跨运行去重
+            key = dedup_key("", title)
+            if key and key in applied_index:
+                skipped_count += 1
+                record(
+                    log,
+                    log_file,
+                    "skipped",
+                    {"job": title, "reason": "已投过（跨运行去重）"},
+                )
+                print(f"[已投] {title[:30]}")
+                continue
+
             clicked = click_card_by_title(page, title)
             if not clicked:
                 print(f"  ⚠️  点击失败: {title[:20]}")
@@ -238,8 +246,12 @@ def main():
 
             if score < args.min_score:
                 skipped_count += 1
-                log["skipped"].append({"job": title, "score": score, "reason": reason})
-                save_log(log, log_file)
+                record(
+                    log,
+                    log_file,
+                    "skipped",
+                    {"job": title, "score": score, "reason": reason},
+                )
                 continue
 
             ok, action = click_send_resume(page)
@@ -256,10 +268,12 @@ def main():
 
             if not ok:
                 print("  ⚠️  未找到投递按钮，跳过")
-                log["skipped"].append(
-                    {"job": title, "score": score, "reason": "按钮未找到"}
+                record(
+                    log,
+                    log_file,
+                    "skipped",
+                    {"job": title, "score": score, "reason": "按钮未找到"},
                 )
-                save_log(log, log_file)
                 skipped_count += 1
                 continue
 
@@ -271,8 +285,14 @@ def main():
             time.sleep(2)
 
             applied_count += 1
-            log["applied"].append({"job": title, "score": score, "action": action})
-            save_log(log, log_file)
+            if key:
+                applied_index.add(key)
+            record(
+                log,
+                log_file,
+                "applied",
+                {"job": title, "score": score, "action": action},
+            )
             print(f"  ✅ 已投递 [{action}] ({applied_count}/{target_count})")
 
             if page_disconnected:
@@ -283,13 +303,7 @@ def main():
             else:
                 time.sleep(2)
 
-    print(f"""
-╔══════════════════════════════════╗
-  投递完成（鱼泡直聘）
-  成功: {applied_count} 份  跳过: {skipped_count} 份
-  日志: {log_file}
-╚══════════════════════════════════╝
-""")
+    print_summary("鱼泡直聘", applied_count, skipped_count, log_file)
 
 
 if __name__ == "__main__":

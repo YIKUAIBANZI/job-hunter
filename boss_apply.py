@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 """Boss直聘自动投递脚本（DrissionPage版）"""
 
-import argparse
 import json
 import time
 from pathlib import Path
 
-from DrissionPage import ChromiumPage, ChromiumOptions
-
-from shared import load_log, save_log, score_jd
+from shared import (
+    connect_chrome,
+    dedup_key,
+    is_blacklisted,
+    load_applied_index,
+    load_config,
+    load_log,
+    parse_common_args,
+    print_summary,
+    record,
+    score_jd,
+)
 
 # 常用城市代码
 CITY_CODES = {
@@ -24,27 +32,18 @@ CITY_CODES = {
 }
 
 
-def parse_args(cfg: dict):
-    p = argparse.ArgumentParser()
-    p.add_argument("--job", required=True, help="搜索岗位名")
-    p.add_argument("--city", default="全国", help=f"城市，可选: {list(CITY_CODES)}")
-    p.add_argument("--count", type=int, default=cfg["default_count"], help="投递数量")
-    p.add_argument(
-        "--min-score",
-        type=int,
-        default=cfg["min_score"],
-        help="最低评分（0=全投不过滤）",
-    )
-    return p.parse_args()
-
-
 def main():
     cfg = load_config()
-    args = parse_args(cfg)
+    args = parse_common_args(
+        CITY_CODES,
+        default_count=cfg["default_count"],
+        default_min_score=cfg["min_score"],
+    )
     city_code = CITY_CODES.get(args.city, "100010000")
     log_file = Path(__file__).parent / f"boss-{args.city}-log.json"
 
     log = load_log(log_file)
+    applied_index = load_applied_index()
     applied_count = 0
     skipped_count = 0
     seen_titles = set()
@@ -56,8 +55,7 @@ def main():
         f"🎯 Boss直聘 | 岗位: {target_job} | 城市: {args.city} | 目标: {target_count} 份"
     )
     print("🔗 连接 Chrome（端口 9222）...")
-    opts = ChromiumOptions().set_local_port(9222)
-    page = ChromiumPage(addr_or_opts=opts)
+    page = connect_chrome()
 
     search_url = (
         f"https://www.zhipin.com/web/geek/job?query={target_job}实习&city={city_code}"
@@ -130,6 +128,33 @@ def main():
                 or ""
             )
 
+            # 公司黑名单 / 跨运行去重 → 点击前先拦掉，省一次 JD 加载
+            key = dedup_key(company, title)
+            if is_blacklisted(company, cfg):
+                skipped_count += 1
+                record(
+                    log,
+                    log_file,
+                    "skipped",
+                    {"company": company, "job": title, "reason": "公司黑名单"},
+                )
+                print(f"[黑名单] {company} | {title}")
+                continue
+            if key and key in applied_index:
+                skipped_count += 1
+                record(
+                    log,
+                    log_file,
+                    "skipped",
+                    {
+                        "company": company,
+                        "job": title,
+                        "reason": "已投过（跨运行去重）",
+                    },
+                )
+                print(f"[已投] {company} | {title}")
+                continue
+
             try:
                 # page级JS按岗位名定位并点击卡片
                 page.run_js(f"""
@@ -156,15 +181,17 @@ def main():
                     )
                     if btn_disabled:
                         skipped_count += 1
-                        log["skipped"].append(
+                        record(
+                            log,
+                            log_file,
+                            "skipped",
                             {
                                 "company": company,
                                 "job": title,
                                 "score": score,
                                 "reason": "已沟通过",
-                            }
+                            },
                         )
-                        save_log(log, log_file)
                         continue
 
                     # page级JS点击"立即沟通"
@@ -179,34 +206,39 @@ def main():
                     time.sleep(4)
 
                     applied_count += 1
-                    log["applied"].append(
+                    if key:
+                        applied_index.add(key)
+                    record(
+                        log,
+                        log_file,
+                        "applied",
                         {
                             "company": company,
                             "job": title,
                             "salary": salary,
                             "score": score,
-                        }
+                        },
                     )
                     print(f"  ✅ 已投递 ({applied_count}/{target_count})")
-                    save_log(log, log_file)
                     time.sleep(2)
                 else:
                     skipped_count += 1
-                    log["skipped"].append(
+                    record(
+                        log,
+                        log_file,
+                        "skipped",
                         {
                             "company": company,
                             "job": title,
                             "score": score,
                             "reason": reason,
-                        }
+                        },
                     )
-                    save_log(log, log_file)
 
             except Exception as e:
                 err = str(e)[:120]
                 print(f"  ❌ 失败: {err}")
-                log["failed"].append({"job": title, "error": err})
-                save_log(log, log_file)
+                record(log, log_file, "failed", {"job": title, "error": err})
                 time.sleep(2)
 
         # 滚动到底部触发无限加载
@@ -223,13 +255,7 @@ def main():
         else:
             break
 
-    print(f"""
-╔══════════════════════════════════╗
-  投递完成
-  成功: {applied_count} 份  跳过: {skipped_count} 份
-  日志: {log_file}
-╚══════════════════════════════════╝
-""")
+    print_summary("Boss直聘", applied_count, skipped_count, log_file)
 
 
 if __name__ == "__main__":

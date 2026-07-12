@@ -40,6 +40,7 @@ origin: local
   "target_roles": ["用户给的方向1", ...],
   "exclude_keywords": ["用户给的排除词1", ...],
   "boost_keywords": ["llm", "大模型", "agent", "rag", "gpt"],
+  "company_blacklist": ["外包", "劳务派遣"],
   "min_score": 60,
   "default_count": 20
 }
@@ -53,9 +54,9 @@ origin: local
 
 > 告诉我本次投递：
 > 1. 搜索岗位名（如：产品经理实习）
-> 2. 城市（鱼泡支持 50+ 城市；Boss 支持 9 大城市+全国）
+> 2. 城市（鱼泡支持 50+ 城市；Boss 支持 9 大城市+全国；猎聘支持 12 个常用城市）
 > 3. 投递数量（默认 20）
-> 4. 平台：Boss直聘 / 鱼泡直聘 / 两者都投
+> 4. 平台：Boss直聘 / 鱼泡直聘 / 51job / 猎聘 / 多平台组合
 
 ### Step 3：打开浏览器让用户登录
 
@@ -94,6 +95,9 @@ python3 yupao_apply.py --job "产品经理实习" --city 深圳 --count 20
 # 51job / 前程无忧（需要先在 51job 完善在线简历）
 python3 51job_apply.py --job "产品经理" --city 杭州 --count 20
 
+# 猎聘（点岗位标题→新开 JD tab→聊一聊 即视为投递）
+python3 liepin_apply.py --job "ai产品经理" --city 深圳 --count 20
+
 # 只想广撒网、不过滤评分：
 python3 yupao_apply.py --job "java实习" --city 北京 --count 20 --min-score 0
 ```
@@ -107,7 +111,10 @@ python3 yupao_apply.py --job "java实习" --city 北京 --count 20 --min-score 0
 ## 技术栈
 
 - **DrissionPage 4.x** — CDP 连接本地 Chrome（端口 9222）
-- **shared.py** — 公共模块（`load_config` / `load_log` / `save_log` / `score_jd`）
+- **shared.py** — 公共模块：
+  - 配置/评分/日志：`load_config` / `load_log` / `save_log` / `score_jd`
+  - 通用脚手架：`connect_chrome`（连 9222）/ `parse_common_args`（统一 `--job/--city/--count/--min-score`）/ `record`（追加日志并落盘）/ `print_summary`（结尾汇总框）
+  - 去重与黑名单：`load_applied_index`（聚合所有 `*-log.json` 的已投索引）/ `dedup_key`（公司+标题归一化键）/ `is_blacklisted`（公司名子串命中黑名单）
 
 ## 文件结构
 
@@ -136,6 +143,14 @@ python3 yupao_apply.py --job "java实习" --city 北京 --count 20 --min-score 0
 
 ≥ `min_score` 投递，< `min_score` 跳过。用户改 `config.json` 可调权重。
 
+## 跨运行去重 & 公司黑名单
+
+四个平台统一接入，投递前先拦截：
+
+- **跨运行去重**：启动时 `load_applied_index()` 扫描本目录所有 `*-log.json` 的 `applied[]`，聚合成"已投索引"。去重键 = `归一化(公司名) + 归一化(岗位标题)`，**跨搜索、跨平台生效**。已投过的同一岗位在任何平台都不再重复投（记为 `skipped`，reason=`已投过（跨运行去重）`）。删掉某个 log 文件即自动"遗忘"。
+  - 公司名缺失的平台（鱼泡左列表、部分 51job 卡片）退化为**按标题去重**；boss/猎聘/51job 能拿到公司名时是"公司+标题"精确去重。
+- **公司黑名单**：`config.json` 的 `company_blacklist`（子串、大小写不敏感）命中公司名 → 永远跳过（reason=`公司黑名单`）。鱼泡拿不到公司名，黑名单对其不生效。
+
 ## 平台差异速查
 
 | 平台 | 投递方式 | 分页 | 城市参数 | 前置要求 |
@@ -143,6 +158,7 @@ python3 yupao_apply.py --job "java实习" --city 北京 --count 20 --min-score 0
 | Boss直聘 | 右侧"立即沟通" | 无限滚动 | 9 大城市+全国 | 登录 |
 | 鱼泡直聘 | "发送简历"优先，降级"聊一聊" | 滚动加载 | 50+ 城市 | 登录 |
 | 51job | 搜索页内联 `button.btn.apply` | `&pageNum=N` | 北京/上海/广州/深圳/杭州 | 登录 + 完善 51job 在线简历 |
+| 猎聘 | 点标题→新开 JD tab→"聊一聊"；"继续聊"=已投跳过 | `&currentPage=N` (0 起) | 12 个常用城市 | 登录 |
 
 **51job 特别说明**：
 - 部分校招岗位链接跳到 `yingjiesheng.com`（应届生求职网），脚本会**自动跳过**这类卡片

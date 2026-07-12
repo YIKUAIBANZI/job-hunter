@@ -4,15 +4,23 @@
 前置要求：51job 在线简历必须填写完整，否则点投递会被踢到简历向导页。
 """
 
-import argparse
 import json
 import time
 from pathlib import Path
 from urllib.parse import quote
 
-from DrissionPage import ChromiumPage, ChromiumOptions
-
-from shared import load_config, load_log, save_log, score_jd
+from shared import (
+    connect_chrome,
+    dedup_key,
+    is_blacklisted,
+    load_applied_index,
+    load_config,
+    load_log,
+    parse_common_args,
+    print_summary,
+    record,
+    score_jd,
+)
 
 
 # we.51job.com 的 jobArea 参数（已验证）
@@ -26,26 +34,8 @@ CITY_CODES = {
 }
 
 
-def parse_args(cfg: dict):
-    p = argparse.ArgumentParser()
-    p.add_argument("--job", required=True, help="搜索岗位名")
-    p.add_argument(
-        "--city",
-        default="深圳",
-        help=f"城市（暂支持：{'/'.join(CITY_CODES)}）",
-    )
-    p.add_argument("--count", type=int, default=cfg["default_count"], help="投递数量")
-    p.add_argument(
-        "--min-score",
-        type=int,
-        default=cfg["min_score"],
-        help="最低评分阈值（0=全投不过滤）",
-    )
-    return p.parse_args()
-
-
 def get_cards(search_tab) -> list[dict]:
-    """抓搜索页所有卡片元数据 + 投递按钮状态"""
+    """抓搜索页所有卡片元数据 + 投递按钮状态 + 校招标签"""
     return (
         search_tab.run_js("""
         return Array.from(document.querySelectorAll('.joblist-item')).map(c => {
@@ -55,6 +45,15 @@ def get_cards(search_tab) -> list[dict]:
             } catch(e) {}
             var link = c.querySelector('a')?.href || '';
             var btn = c.querySelector('button.btn.apply');
+            // 公司名：优先 DOM 卡片内的公司元素，降级 sensorsdata（抓不到留空）
+            var cname = (
+                c.querySelector('.cname, .company-name, .company_name, [class*="cname"]')?.innerText
+                || sd.companyName || sd.jobCompanyName || ''
+            ).trim();
+            // 校招标签：卡片内有纯文字"校招"的小标签元素
+            var isCampus = Array.from(c.querySelectorAll('*')).some(e =>
+                e.children.length === 0 && e.textContent.trim() === '校招'
+            );
             return {
                 jobId: sd.jobId || '',
                 title: sd.jobTitle || '',
@@ -62,8 +61,10 @@ def get_cards(search_tab) -> list[dict]:
                 area: sd.jobArea || '',
                 year: sd.jobYear || '',
                 degree: sd.jobDegree || '',
+                company: cname,
                 href: link,
                 btnText: (btn?.innerText || '').trim(),
+                isCampus: isCampus,
             };
         }).filter(x => x.jobId);
     """)
@@ -87,6 +88,47 @@ def fetch_jd(detail_tab, href: str) -> str:
         )
     except Exception:
         return ""
+
+
+def click_apply_on_detail(detail_tab) -> str:
+    """在详情页点'申请职位'按钮"""
+    return (
+        detail_tab.run_js("""
+        // 找 "申请职位" 按钮
+        var all = Array.from(document.querySelectorAll('button, a, div, span'));
+        var btn = all.find(e =>
+            e.children.length === 0 &&
+            e.textContent.trim() === '申请职位'
+        );
+        if (!btn) {
+            // 兼容：父元素是 button 而文字在子 span
+            btn = all.find(e =>
+                /^(BUTTON|A)$/.test(e.tagName) && e.innerText?.trim() === '申请职位'
+            );
+        }
+        if (!btn) return 'not_found';
+        btn.scrollIntoView({block:'center'});
+        ['mousedown','mouseup','click'].forEach(ev =>
+            btn.dispatchEvent(new MouseEvent(ev, {bubbles:true, cancelable:true, view:window}))
+        );
+        return 'clicked';
+    """)
+        or "js_null"
+    )
+
+
+def detail_apply_result(detail_tab) -> str:
+    """读详情页 body，判定申请结果: success / resume_guide / pending"""
+    try:
+        url = detail_tab.url
+    except Exception:
+        return "pending"
+    if "resume/guide" in url:
+        return "resume_guide"
+    body = detail_tab.run_js("return document.body.innerText.slice(0, 500);") or ""
+    if "已申请" in body or "申请成功" in body or "投递成功" in body:
+        return "success"
+    return "pending"
 
 
 def click_apply(search_tab, job_id: str) -> str:
@@ -140,7 +182,12 @@ def read_button_state(search_tab, job_id: str) -> str:
 
 def main():
     cfg = load_config()
-    args = parse_args(cfg)
+    args = parse_common_args(
+        CITY_CODES,
+        default_city="深圳",
+        default_count=cfg["default_count"],
+        default_min_score=cfg["min_score"],
+    )
 
     if args.city not in CITY_CODES:
         print(f"❌ 未支持的城市：{args.city}。支持：{list(CITY_CODES)}")
@@ -152,6 +199,7 @@ def main():
     log_file = Path(__file__).parent / f"51job-{args.job[:10]}-log.json"
 
     log = load_log(log_file)
+    applied_index = load_applied_index()
     seen_ids = set(
         str(e.get("jobId", "")) for e in log.get("applied", []) + log.get("skipped", [])
     )
@@ -159,8 +207,7 @@ def main():
     print(f"🎯 51job | 岗位: {args.job} | 城市: {args.city} | 目标: {args.count} 份")
     print(f"   最低评分: {args.min_score} | 已记录: {len(seen_ids)} 个 jobId")
     print("🔗 连接 Chrome（端口 9222）...")
-    opts = ChromiumOptions().set_local_port(9222)
-    page = ChromiumPage(addr_or_opts=opts)
+    page = connect_chrome()
     search_tab = page.new_tab(search_url)
     time.sleep(5)
 
@@ -178,18 +225,27 @@ def main():
 
     try:
         while applied < args.count:
-            search_tab.get(f"{search_url}&pageNum={page_num}")
+            # 搜索 tab 可能断连 → 重开
+            try:
+                search_tab.get(f"{search_url}&pageNum={page_num}")
+            except Exception:
+                print(f"  ⚠️  search_tab 断连，重开第 {page_num} 页")
+                search_tab = page.new_tab(f"{search_url}&pageNum={page_num}")
             time.sleep(4)
 
-            # 预热：滚到底再回顶，逼所有卡片完成 Vue 水合（解决首屏卡片点击失效）
-            search_tab.run_js("""
-                window.scrollTo(0, document.body.scrollHeight);
-            """)
-            time.sleep(2)
-            search_tab.run_js("window.scrollTo(0, 0);")
-            time.sleep(1)
+            # 预热：滚到底再回顶（解决首屏卡片 Vue 水合时机）
+            try:
+                search_tab.run_js("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(2)
+                search_tab.run_js("window.scrollTo(0, 0);")
+                time.sleep(1)
+            except Exception:
+                pass  # 预热失败不影响主流程
 
-            cards = get_cards(search_tab)
+            try:
+                cards = get_cards(search_tab)
+            except Exception:
+                cards = []
             if not cards:
                 print("没有更多岗位，停止")
                 break
@@ -213,24 +269,83 @@ def main():
                     break
                 seen_ids.add(c["jobId"])
 
+                company = c.get("company", "")
+                key = dedup_key(company, c["title"])
+
+                # 公司黑名单 → 直接跳过
+                if is_blacklisted(company, cfg):
+                    skipped += 1
+                    record(
+                        log,
+                        log_file,
+                        "skipped",
+                        {
+                            "jobId": c["jobId"],
+                            "company": company,
+                            "job": c["title"],
+                            "reason": "公司黑名单",
+                        },
+                    )
+                    print(f"[黑名单] {company} | {c['title'][:30]}")
+                    continue
+
+                # 跨运行去重 → 已投过则跳过（省一次详情页加载）
+                if key and key in applied_index:
+                    skipped += 1
+                    record(
+                        log,
+                        log_file,
+                        "skipped",
+                        {
+                            "jobId": c["jobId"],
+                            "company": company,
+                            "job": c["title"],
+                            "reason": "已投过（跨运行去重）",
+                        },
+                    )
+                    print(f"[已投] {c['title'][:30]}")
+                    continue
+
+                # 校招卡片直接跳过（避免浏览器加载应届生外链）
+                if c.get("isCampus"):
+                    skipped += 1
+                    record(
+                        log,
+                        log_file,
+                        "skipped",
+                        {
+                            "jobId": c["jobId"],
+                            "job": c["title"],
+                            "reason": "校招岗位（外链应届生求职网）",
+                        },
+                    )
+                    print(f"[跳过] {c['title'][:30]} → 校招")
+                    continue
+
                 jd = fetch_jd(detail_tab, c["href"])
                 try:
                     detail_url = detail_tab.url
                 except Exception:
                     detail_url = ""
 
-                # 外链岗位（跳到应届生求职网）直接跳过
+                # 外链岗位（跳到应届生求职网）→ 自动跳回 51job 搜索，继续下一个
                 if "yingjiesheng.com" in detail_url:
+                    try:
+                        detail_tab.get("https://we.51job.com/pc/search")
+                    except Exception:
+                        pass
                     skipped += 1
-                    log["skipped"].append(
+                    record(
+                        log,
+                        log_file,
+                        "skipped",
                         {
                             "jobId": c["jobId"],
                             "job": c["title"],
-                            "reason": "外链(应届生求职网)",
-                        }
+                            "reason": "外链(应届生求职网)→已跳回51job",
+                        },
                     )
-                    save_log(log, log_file)
-                    print(f"[跳过] {c['title'][:30]} → 应届生外链")
+                    print(f"[跳过] {c['title'][:30]} → 应届生外链（已跳回51job）")
                     continue
 
                 meta_line = f"{c['area']} {c['salary']} {c['year']} {c['degree']}"
@@ -242,65 +357,59 @@ def main():
 
                 if score < args.min_score:
                     skipped += 1
-                    log["skipped"].append(
+                    record(
+                        log,
+                        log_file,
+                        "skipped",
                         {
                             "jobId": c["jobId"],
                             "job": c["title"],
                             "score": score,
                             "reason": reason,
-                        }
+                        },
                     )
-                    save_log(log, log_file)
                     continue
 
-                result = click_apply(search_tab, c["jobId"])
+                # 在详情页点"申请职位"（detail_tab 当前就在详情页）
+                result = click_apply_on_detail(detail_tab)
                 time.sleep(3)
 
                 # 跳到简历向导 = 在线简历未完善
-                try:
-                    current_url = search_tab.url
-                except Exception:
-                    print("  ⚠️  search_tab 连接中断，重开搜索页")
-                    search_tab = page.new_tab(search_url)
-                    time.sleep(4)
-                    continue
-                if "resume/guide" in current_url:
+                state = detail_apply_result(detail_tab)
+                if state == "resume_guide":
                     print("  ⚠️  被踢到简历向导 — 请先在 51job 完善在线简历")
-                    print("     当前卡片未投递，流程终止")
                     return
 
-                state = read_button_state(search_tab, c["jobId"])
-                # 首次未生效 → 再点一次
-                if "已申请" not in state and result == "clicked":
-                    time.sleep(1)
-                    click_apply(search_tab, c["jobId"])
-                    time.sleep(3)
-                    state = read_button_state(search_tab, c["jobId"])
-
-                if "已申请" in state:
+                if state == "success":
                     applied += 1
-                    log["applied"].append(
+                    if key:
+                        applied_index.add(key)
+                    record(
+                        log,
+                        log_file,
+                        "applied",
                         {
                             "jobId": c["jobId"],
+                            "company": company,
                             "job": c["title"],
                             "salary": c["salary"],
                             "area": c["area"],
                             "score": score,
-                        }
+                        },
                     )
-                    save_log(log, log_file)
-                    print(f"  ✅ 已投递 ({applied}/{args.count})")
+                    print(f"  ✅ 已申请 ({applied}/{args.count})")
                 else:
-                    log["failed"].append(
+                    record(
+                        log,
+                        log_file,
+                        "failed",
                         {
                             "jobId": c["jobId"],
                             "job": c["title"],
-                            "external": external_tag or "",
-                            "reason": f"click={result}, state={state!r}",
-                        }
+                            "reason": f"click={result}, state={state}",
+                        },
                     )
-                    save_log(log, log_file)
-                    print(f"  ❌ 未确认成功: click={result}, 按钮={state!r}")
+                    print(f"  ❌ 未确认成功: click={result}, 状态={state}")
 
                 time.sleep(2)
 
@@ -311,15 +420,7 @@ def main():
         except Exception:
             pass
 
-    print(
-        f"""
-╔══════════════════════════════════╗
-  51job 投递完成
-  成功: {applied} 份  跳过: {skipped} 份
-  日志: {log_file}
-╚══════════════════════════════════╝
-"""
-    )
+    print_summary("51job", applied, skipped, log_file)
 
 
 if __name__ == "__main__":
