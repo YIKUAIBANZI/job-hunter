@@ -1,3 +1,5 @@
+
+
 # Job Hunter — AI 辅助的求职自动投递
 
 > 与其广撒网，不如精准慢投。让 AI 读你的简历，只投匹配的岗位。
@@ -102,6 +104,7 @@ python3 yupao_apply.py --job "Java实习" --city 北京 --count 20 --min-score 0
 | `target_roles` | 期望岗位 → 标题命中 +30 分 |
 | `exclude_keywords` | 排除词 → 命中直接归零（如 "总监"、"架构师"） |
 | `boost_keywords` | 加权词 → JD 命中 +10 分（AI/LLM 等） |
+| `company_blacklist` | 公司黑名单 → 公司名命中直接跳过（子串、大小写不敏感） |
 | `min_score` | 最低投递分，默认 60 |
 | `default_count` | 默认投递数量 |
 
