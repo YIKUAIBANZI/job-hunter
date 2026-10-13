@@ -2,9 +2,13 @@
 
 import argparse
 import json
+import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from DrissionPage import ChromiumOptions, ChromiumPage
+
+BOSS_JOB_ID_PATTERN = r"(?:^|/)job_detail/([A-Za-z0-9_-]+)\.html$"
 
 DEFAULT_CONFIG = {
     "resume_path": "",
@@ -30,13 +34,41 @@ def load_config(skill_dir: Path | None = None) -> dict:
 
 
 def load_log(log_file: Path) -> dict:
-    if log_file.exists():
-        return json.loads(log_file.read_text())
-    return {"applied": [], "skipped": [], "failed": []}
+    log = json.loads(log_file.read_text()) if log_file.exists() else {}
+    for bucket in ("applied", "pending", "skipped", "failed"):
+        log.setdefault(bucket, [])
+    return log
 
 
 def save_log(log: dict, log_file: Path):
     log_file.write_text(json.dumps(log, ensure_ascii=False, indent=2))
+
+
+def parse_boss_job_id(href: str) -> str:
+    """从相对/绝对职位链接的路径提取 encryptJobId，忽略 query 和 fragment。"""
+    if not isinstance(href, str):
+        return ""
+    try:
+        url = urlsplit(href)
+    except ValueError:
+        return ""
+    if url.scheme not in ("", "http", "https"):
+        return ""
+    match = re.search(BOSS_JOB_ID_PATTERN, url.path)
+    return match.group(1) if match else ""
+
+
+def classify_boss_chat_response(packet_info: dict | None) -> tuple[str, str]:
+    """按原始 http_status/code/message 判定；截断 message 只在日志层进行。"""
+    if not packet_info:
+        return "pending", "未捕获接口响应"
+    code = packet_info.get("code")
+    message = str(packet_info.get("message") or "")
+    if packet_info.get("http_status") == 200 and code == 0:
+        return "chat_started", "接口确认"
+    if any(word in message for word in ("上限", "频繁", "验证", "异常")):
+        return "blocked", message
+    return "failed", f"code={code} {message}"
 
 
 def score_jd(title: str, desc: str, config: dict | None = None) -> tuple[int, str]:
@@ -105,7 +137,7 @@ def parse_common_args(
     count_help: str = "投递数量",
     argv: list[str] | None = None,
 ) -> argparse.Namespace:
-    """四个平台通用的命令行参数：--job / --city / --count / --min-score。
+    """四个平台通用参数；--dry-run / --fast 目前仅 Boss 实际使用。
 
     差异（默认城市、默认数量、count 帮助文案）通过关键字参数注入，
     argv 仅供测试注入，正常运行传 None 走 sys.argv。
@@ -122,6 +154,8 @@ def parse_common_args(
         default=default_min_score,
         help="最低评分（0=不过滤）",
     )
+    p.add_argument("--dry-run", action="store_true", help="仅 Boss：只读 JD 和打分，不沟通")
+    p.add_argument("--fast", action="store_true", help="仅 Boss 调试：沟通间隔降至 3–6 秒")
     return p.parse_args(argv)
 
 
@@ -129,18 +163,20 @@ def parse_common_args(
 
 
 def record(log: dict, log_file: Path, bucket: str, entry: dict) -> dict:
-    """把一条记录追加到 log[bucket]（applied/skipped/failed）并落盘。"""
+    """把一条记录追加到 log[bucket]（applied/pending/skipped/failed）并落盘。"""
     log[bucket].append(entry)
     save_log(log, log_file)
     return log
 
 
-def print_summary(platform: str, applied: int, skipped: int, log_file: Path):
+def print_summary(
+    platform: str, applied: int, skipped: int, log_file: Path, pending: int = 0
+):
     """统一的结尾汇总框。"""
     print(f"""
 ╔══════════════════════════════════╗
   {platform} 投递完成
-  成功: {applied} 份  跳过: {skipped} 份
+  成功: {applied} 份  待核验: {pending} 份  跳过: {skipped} 份
   日志: {log_file}
 ╚══════════════════════════════════╝
 """)
@@ -167,7 +203,7 @@ def dedup_key(company, title) -> str:
 
 
 def load_applied_index(skill_dir: Path | None = None) -> set[str]:
-    """扫描目录下所有 *-log.json 的 applied[]，聚合成"已投索引"（dedup_key 集合）。
+    """聚合 *-log.json 的 applied/pending；保留公司+标题键，职位 ID 另加 boss: 键。
 
     跨搜索、跨平台生效；删除某个 log 文件即自动"遗忘"对应记录。
     坏文件/缺字段一律跳过，不抛异常。
@@ -179,10 +215,20 @@ def load_applied_index(skill_dir: Path | None = None) -> set[str]:
             data = json.loads(log_file.read_text(encoding="utf-8"))
         except Exception:
             continue
-        for entry in data.get("applied", []):
-            key = dedup_key(entry.get("company", ""), entry.get("job", ""))
-            if key:
-                index.add(key)
+        if not isinstance(data, dict):
+            continue
+        for bucket in ("applied", "pending"):
+            entries = data.get(bucket, [])
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                key = dedup_key(entry.get("company", ""), entry.get("job", ""))
+                if key:
+                    index.add(key)
+                if entry.get("job_id"):
+                    index.add(f"boss:{entry['job_id']}")
     return index
 
 

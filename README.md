@@ -86,9 +86,18 @@ python3 yupao_apply.py --job "产品经理实习" --city 深圳 --count 20
 # Boss 直聘
 python3 boss_apply.py --job "产品经理" --city 深圳 --count 20
 
+# Boss 只浏览 JD、打印职位 ID 和评分，不点“立即沟通”（count 为评分上限）
+python3 boss_apply.py --job "产品经理" --city 深圳 --count 20 --dry-run
+
 # 关掉评分过滤，全投
 python3 yupao_apply.py --job "Java实习" --city 北京 --count 20 --min-score 0
 ```
+
+**Boss 核验与节奏**：卡片按职位 ID 定位；缺 ID 记 `skipped`（无职位ID）。仅接口 HTTP 200 且 `code=0` 记 `applied`（`status=chat_started`）并计入成功；未捕获响应记 `pending`，不计数、不重试，并加入去重。明确错误记 `failed`；接口风控或页面验证记 `failed`（`status=blocked`），汇总后立即退出。
+
+Boss 日志的 `evidence.packets` 保存本次点击后 8 秒核验窗口内捕获的全部 `friend/add` 命中包：`url`、`http_status`、原始 `code` 和 `message`（最多 200 字）。监听路径和验证弹层选择器仍需实测校准；多包时风控优先终止，其余以捕获到接口确认为成功。去重先查 `boss:{job_id}`，再查公司+岗位旧键，兼容旧日志及跨平台去重。
+
+默认每次沟通点击后随机等待 30–90 秒，每确认成功 5 份额外休息 3–5 分钟，浏览等待有 ±25% 抖动。`--fast` **仅供调试**，将沟通间隔及额外休息降为 3–6 秒，核验窗口仍为 8 秒。`--dry-run` 的评分结果仅打印及汇总，不写 `applied/pending`，也不把评分结果写进 `skipped`；缺 ID、黑名单、历史去重仍可记录跳过。两个开关目前只有 Boss 实际使用。
 
 ## 配置说明
 

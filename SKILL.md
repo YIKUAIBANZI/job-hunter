@@ -89,6 +89,9 @@ cd ~/.claude/skills/job-hunter
 # Boss直聘
 python3 boss_apply.py --job "产品经理" --city 深圳 --count 20
 
+# Boss 只验证职位 ID / JD / 评分，不发起沟通；count 为评分数量上限
+python3 boss_apply.py --job "产品经理" --city 深圳 --count 20 --dry-run
+
 # 鱼泡直聘（支持 50+ 城市，默认按 config.json 的 min_score 过滤）
 python3 yupao_apply.py --job "产品经理实习" --city 深圳 --count 20
 
@@ -105,6 +108,12 @@ python3 yupao_apply.py --job "java实习" --city 北京 --count 20 --min-score 0
 ### Step 5：反馈结果
 
 脚本结束后读取 `*-log.json` 给出报告：成功 / 跳过 / 失败数量，日志路径。
+
+**Boss 补充**：`applied` 仅表示接口确认已沟通（`status=chat_started`，HTTP 200 且 `code=0`）；`pending` 表示点击后待核验，不算成功、不重试，也进入去重。`skipped` 为未提交的跳过；`failed` 为明确失败或风控（`status=blocked`），风控/页面验证会立即终止并汇总。报告须单列 pending 数量，不把它并入成功。
+
+Boss 暂按 `friend/add` 监听，`evidence.packets` 保存点击后 8 秒窗口内捕获的命中包 URL、`http_status`、原始 `code/message`（message 截断 200 字），供实测校准路径和验证弹层。多包时风控优先终止，其余以捕获到接口确认为成功。每次沟通点击后随机休息 30–90 秒，每确认成功 5 份额外休息 3–5 分钟，浏览等待 ±25% 抖动。`--fast` 仅供调试，将沟通间隔和额外休息降至 3–6 秒，核验窗口不变。
+
+`--dry-run` 照常浏览/读 JD/打分，只打印评分与汇总，不点击沟通、不写 applied/pending 或评分 skipped；缺 ID、黑名单、历史去重仍可记 skipped。`--dry-run` / `--fast` 当前只有 Boss 使用，其他平台仅接受参数。
 
 ---
 
@@ -149,6 +158,7 @@ python3 yupao_apply.py --job "java实习" --city 北京 --count 20 --min-score 0
 
 - **跨运行去重**：启动时 `load_applied_index()` 扫描本目录所有 `*-log.json` 的 `applied[]`，聚合成"已投索引"。去重键 = `归一化(公司名) + 归一化(岗位标题)`，**跨搜索、跨平台生效**。已投过的同一岗位在任何平台都不再重复投（记为 `skipped`，reason=`已投过（跨运行去重）`）。删掉某个 log 文件即自动"遗忘"。
   - 公司名缺失的平台（鱼泡左列表、部分 51job 卡片）退化为**按标题去重**；boss/猎聘/51job 能拿到公司名时是"公司+标题"精确去重。
+  - Boss 卡片定位与本轮 seen 按职位 ID；无 ID 不投（reason=`无职位ID`）。索引同时收录 `pending[]`，有 `job_id` 的记录额外加入 `boss:{job_id}`；Boss 先查 ID 键，再查公司+标题键，旧日志仍兼容。
 - **公司黑名单**：`config.json` 的 `company_blacklist`（子串、大小写不敏感）命中公司名 → 永远跳过（reason=`公司黑名单`）。鱼泡拿不到公司名，黑名单对其不生效。
 
 ## 平台差异速查
