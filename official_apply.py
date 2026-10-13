@@ -22,6 +22,7 @@ AGGREGATORS = [
     "lagou.com", "shixiseng.com", "yingjiesheng.com", "maimai.cn", "jobui.com",
     "58.com", "ganji.com", "baidu.com/zhaopin", "zhihu.com", "xiaohongshu.com",
     "weibo.com", "sohu.com", "163.com", "new.qq.com", "csdn.net",
+    "niuqizp.com",  # 第三方校招聚合，campus. 子域会被误判为官方 ATS
 ]
 ATS_DOMAINS = (
     "mokahr.com", "zhiye.com", "hotjob.cn", "jobs.feishu.cn", "feishu.cn/hire",
