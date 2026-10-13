@@ -162,6 +162,10 @@ def parse_common_args(
     if include_matcher:
         p.add_argument("--matcher", choices=("jev", "keyword"), default="jev",
                        help="Boss 匹配器：jev（默认）或 keyword（使用 --min-score）")
+        p.add_argument("--job-type", default="实习", help="Boss 求职类型：不限/全职/实习/兼职（默认 实习）")
+        p.add_argument("--experience", default="在校生,应届生,经验不限",
+                       help="Boss 工作经验，逗号分隔，如 在校生,应届生（空=不限）")
+        p.add_argument("--degree", default="", help="Boss 学历要求，逗号分隔，如 本科,大专（空=不限）")
     return p.parse_args(argv)
 
 

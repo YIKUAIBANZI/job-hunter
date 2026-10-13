@@ -6,7 +6,7 @@ import random
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from jev_match import (
     MAX_CONSECUTIVE_FAILURES,
@@ -46,6 +46,34 @@ CITY_CODES = {
     "武汉": "101200100",
     "南京": "101190100",
 }
+
+# Boss 搜索筛选代码，来自 /wapi/zpgeek/pc/all/filter/conditions.json（2026-10-14 抓取）
+JOB_TYPES = {"不限": "", "全职": "1901", "实习": "1902", "兼职": "1903"}
+EXPERIENCES = {"在校生": "108", "应届生": "102", "经验不限": "101", "1年以内": "103",
+               "1-3年": "104", "3-5年": "105", "5-10年": "106", "10年以上": "107"}
+DEGREES = {"初中及以下": "209", "中专/中技": "208", "高中": "206", "大专": "202",
+           "本科": "203", "硕士": "204", "博士": "205"}
+
+
+def _codes(value, table, label):
+    """逗号分隔的中文选项 → 逗号分隔代码；未知选项直接报错，不静默忽略。"""
+    names = [v.strip() for v in (value or "").replace("，", ",").split(",") if v.strip()]
+    unknown = [n for n in names if n not in table]
+    if unknown:
+        raise SystemExit(f"🛑 未知{label}: {unknown}，可选: {list(table)}")
+    return ",".join(table[n] for n in names if table[n])
+
+
+def build_search_url(job, city_code, job_type="实习", experience="", degree=""):
+    params = [("city", city_code)]
+    for key, value in (("jobType", _codes(job_type, JOB_TYPES, "求职类型")),
+                       ("experience", _codes(experience, EXPERIENCES, "工作经验")),
+                       ("degree", _codes(degree, DEGREES, "学历"))):
+        if value:
+            params.append((key, value))
+    params.append(("query", job))
+    return "https://www.zhipin.com/web/geek/jobs?" + urlencode(params, safe=",")
+
 
 # 调试快模式不改变接口核验窗口；默认保留慢节奏。
 CHAT_TARGET = "friend/add"
@@ -305,7 +333,7 @@ def main():
         print("🔗 连接 Chrome（端口 9222）...")
         page = connect_chrome()
 
-        search_url = f"https://www.zhipin.com/web/geek/job?query={args.job}实习&city={city_code}"
+        search_url = build_search_url(args.job, city_code, args.job_type, args.experience, args.degree)
         print(f"📋 打开搜索页：{search_url}")
         page = page.new_tab(search_url)
         browse_sleep(6)

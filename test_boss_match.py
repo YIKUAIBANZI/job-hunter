@@ -247,3 +247,14 @@ def test_keyword_preserves_score_filter_and_dry_run_logs(harness, monkeypatch, d
     assert len(h.log()["applied"]) == (0 if dry_run else 1)
     assert h.page.opened == ["a", "b"]
     assert "跳过：1" in h.queue()
+
+
+def test_build_search_url_filters():
+    import boss_apply
+    url = boss_apply.build_search_url("AI产品经理", "101280600", "实习", "在校生,应届生", "本科")
+    assert url.startswith("https://www.zhipin.com/web/geek/jobs?city=101280600")
+    assert "jobType=1902" in url and "experience=108,102" in url and "degree=203" in url
+    assert url.endswith("query=AI%E4%BA%A7%E5%93%81%E7%BB%8F%E7%90%86")
+    assert "jobType" not in boss_apply.build_search_url("x", "1", "不限")
+    with pytest.raises(SystemExit):
+        boss_apply.build_search_url("x", "1", "实习", "在校")
