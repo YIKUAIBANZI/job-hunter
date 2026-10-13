@@ -12,6 +12,8 @@ BOSS_JOB_ID_PATTERN = r"(?:^|/)job_detail/([A-Za-z0-9_-]+)\.html$"
 
 DEFAULT_CONFIG = {
     "resume_path": "",
+    "job_profile": "",
+    "resume_redact": [],
     "greeting": "您好，我对贵司岗位非常感兴趣，期待进一步沟通！",
     "skills": [],
     "target_roles": [],
@@ -35,7 +37,7 @@ def load_config(skill_dir: Path | None = None) -> dict:
 
 def load_log(log_file: Path) -> dict:
     log = json.loads(log_file.read_text()) if log_file.exists() else {}
-    for bucket in ("applied", "pending", "skipped", "failed"):
+    for bucket in ("applied", "pending", "review", "skipped", "failed"):
         log.setdefault(bucket, [])
     return log
 
@@ -135,6 +137,7 @@ def parse_common_args(
     default_count: int = 20,
     default_min_score: int = 60,
     count_help: str = "投递数量",
+    include_matcher: bool = False,
     argv: list[str] | None = None,
 ) -> argparse.Namespace:
     """四个平台通用参数；--dry-run / --fast 目前仅 Boss 实际使用。
@@ -156,6 +159,9 @@ def parse_common_args(
     )
     p.add_argument("--dry-run", action="store_true", help="仅 Boss：只读 JD 和打分，不沟通")
     p.add_argument("--fast", action="store_true", help="仅 Boss 调试：沟通间隔降至 3–6 秒")
+    if include_matcher:
+        p.add_argument("--matcher", choices=("jev", "keyword"), default="jev",
+                       help="Boss 匹配器：jev（默认）或 keyword（使用 --min-score）")
     return p.parse_args(argv)
 
 
@@ -163,7 +169,7 @@ def parse_common_args(
 
 
 def record(log: dict, log_file: Path, bucket: str, entry: dict) -> dict:
-    """把一条记录追加到 log[bucket]（applied/pending/skipped/failed）并落盘。"""
+    """把一条记录追加到 log[bucket]（applied/pending/review/skipped/failed）并落盘。"""
     log[bucket].append(entry)
     save_log(log, log_file)
     return log

@@ -165,7 +165,7 @@ def test_load_applied_index_id_does_not_require_company_or_title(tmp_path):
 def test_load_applied_index_excludes_unsubmitted_buckets(tmp_path):
     entry = {"job_id": "job123", "company": "腾讯", "job": "产品经理"}
     (tmp_path / "boss-x-log.json").write_text(json.dumps({
-        "skipped": [entry], "failed": [entry], "dry_run": [entry],
+        "skipped": [entry], "failed": [entry], "dry_run": [entry], "review": [entry],
     }), encoding="utf-8")
     assert load_applied_index(tmp_path) == set()
 
@@ -178,7 +178,7 @@ def test_load_log_adds_pending_to_legacy_file_without_losing_entries(tmp_path):
     entry = {"company": "腾讯", "job": "产品经理"}
     _write_log(path, [entry])
     log = load_log(path)
-    assert log == {"applied": [entry], "pending": [], "skipped": [], "failed": []}
+    assert log == {"applied": [entry], "pending": [], "review": [], "skipped": [], "failed": []}
     assert "pending" not in json.loads(path.read_text())  # 读取不改写旧文件
 
 
@@ -190,7 +190,7 @@ def test_load_log_preserves_existing_pending(tmp_path):
 
 def test_load_log_new_file_includes_pending(tmp_path):
     assert load_log(tmp_path / "new-log.json") == {
-        "applied": [], "pending": [], "skipped": [], "failed": [],
+        "applied": [], "pending": [], "review": [], "skipped": [], "failed": [],
     }
 
 

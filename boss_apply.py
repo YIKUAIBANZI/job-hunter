@@ -8,6 +8,17 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from jev_match import (
+    MAX_CONSECUTIVE_FAILURES,
+    JevError,
+    build_state,
+    clean_jd,
+    format_result,
+    load_jev_key,
+    match_job,
+    redact_resume,
+    render_queue_md,
+)
 from shared import (
     BOSS_JOB_ID_PATTERN,
     classify_boss_chat_response,
@@ -216,9 +227,12 @@ def main():
         CITY_CODES,
         default_count=cfg["default_count"],
         default_min_score=cfg["min_score"],
+        include_matcher=True,
     )
     city_code = CITY_CODES.get(args.city, "100010000")
     log_file = Path(__file__).parent / f"boss-{args.city}-log.json"
+    queue_file = log_file.with_name(f"boss-{args.city}-队列.md")
+    cache_file = log_file.with_name("jev-cache.json")
 
     log = load_log(log_file)
     applied_index = load_applied_index()
@@ -228,19 +242,32 @@ def main():
     dry_run_count = 0
     seen_job_ids = set()
     target_count = args.count
+    rows = []
+    consecutive_jev_failures = 0
+    stop_reason = ""
 
     def summary():
+        stats = {"city": args.city, "dry_run": args.dry_run,
+                 "apply": sum(r.get("decision") == "apply" for r in rows),
+                 "review": sum(r.get("decision") == "review" for r in rows),
+                 "skip": sum(r.get("decision") == "skip" or r.get("status") == "already_contacted"
+                             for r in rows), "applied": applied_count,
+                 "pending": pending_count, "stop_reason": stop_reason}
+        queue_file.write_text(render_queue_md(rows, stats), encoding="utf-8")
         print_summary("Boss直聘", applied_count, skipped_count, log_file, pending=pending_count)
+        print(f"📋 推荐: {stats['apply']} 份  复核: {stats['review']} 份 | 队列: {queue_file}")
         if args.dry_run:
             print(f"🧪 dry-run 已评分: {dry_run_count} 份（仅打印，未发起沟通）")
 
     def stop_blocked(reason, entry, evidence):
+        nonlocal stop_reason
+        stop_reason = reason
+        entry.update(status="blocked", reason=reason)
         record(log, log_file, "failed", {
             **entry, "status": "blocked", "reason": reason,
             "evidence": evidence, "ts": datetime.now().astimezone().isoformat(),
         })
         print(f"\n🛑🛑 检测到风控，立即终止整个脚本：{reason}\n")
-        summary()
         raise SystemExit(1)
 
     def check_page(entry):
@@ -248,167 +275,240 @@ def main():
         if reason:
             stop_blocked(reason, entry, {"packets": [], "page_url": page.url, "page_blocked": reason})
 
-    print(f"🎯 Boss直聘 | 岗位: {args.job} | 城市: {args.city} | 目标: {target_count} 份")
-    if args.dry_run:
-        print("🧪 dry-run：只浏览和打分，--count 为评分数量上限")
-    if args.fast:
-        print("⚠️  --fast 调试模式：沟通间隔及额外休息均为 3–6 秒")
-    print("🔗 连接 Chrome（端口 9222）...")
-    page = connect_chrome()
-
-    search_url = f"https://www.zhipin.com/web/geek/job?query={args.job}实习&city={city_code}"
-    print(f"📋 打开搜索页：{search_url}")
-    page = page.new_tab(search_url)
-    browse_sleep(6)
-    check_page({"platform": "boss"})
-
-    if "login" in page.url or "user/?ka" in page.url:
-        print("⚠️  请先在浏览器登录后按 Enter...")
-        input()
-        page.get(search_url)
-        browse_sleep(4)
-
-    print(f"🎯 开始{'试跑' if args.dry_run else '投递'}，目标 {target_count} 份\n")
-    page_num = 1
-    while (dry_run_count if args.dry_run else applied_count) < target_count:
-        print(f"── 第 {page_num} 页 ──────────────────────")
-        browse_sleep(3)
-        check_page({"platform": "boss"})
-        cards = page.run_js(CARD_SNAPSHOT_JS, BOSS_JOB_ID_PATTERN) or []
-        if not cards:
-            print("未找到卡片，停止")
-            break
-
-        # 无 ID 卡片用 无ID:公司|标题 占位，避免无限滚动时每页重复记 skipped
-        pending_cards = [c for c in cards if (c["job_id"] or f"无ID:{c['company']}|{c['title']}") not in seen_job_ids]
-        print(f"待处理: {len(pending_cards)} 个")
-        for card in pending_cards:
-            if (dry_run_count if args.dry_run else applied_count) >= target_count:
-                break
-            job_id, title = card["job_id"], card["title"]
-            company, salary = card["company"], card["salary"]
-            entry = {"platform": "boss", "job_id": job_id, "company": company,
-                     "job": title, "salary": salary}
-            seen_key = job_id or f"无ID:{company}|{title}"
-            if seen_key in seen_job_ids:
-                continue
-            seen_job_ids.add(seen_key)
-            key = dedup_key(company, title)
-            boss_key = f"boss:{job_id}"
-
-            skip_reason = ""
-            if not job_id:
-                skip_reason = "无职位ID"
-            elif is_blacklisted(company, cfg):
-                skip_reason = "公司黑名单"
-            elif boss_key in applied_index or (key and key in applied_index):
-                skip_reason = "已投过或待核验（跨运行去重）"
-            if skip_reason:
-                skipped_count += 1
-                record(log, log_file, "skipped", {**entry, "reason": skip_reason})
-                print(f"⏭️  [{skip_reason}] {company} | {title} | ID={job_id}")
-                continue
-
+    try:
+        jev_key, resume_text, profile = "", "", ""
+        if args.matcher == "jev":
+            jev_key = load_jev_key()
+            if not jev_key:
+                stop_reason = "缺少 JEV_API_KEY"
+                print("🛑🛑 Jev 模式缺少 JEV_API_KEY：请配置环境变量或 ~/.config/jobhunter/jev.env；未启动浏览器，不会降级。")
+                raise SystemExit(2)
             try:
-                check_page(entry)
-                # 按 href 中的完整职位 ID 实时定位卡片，绝不按同名标题匹配。
-                link = page.ele(
-                    f'css:.job-card-wrap a[href*="job_detail/{job_id}.html"]', timeout=2
-                )
-                if not link:
-                    raise RuntimeError(f"未找到职位卡片: {job_id}")
-                # JS 点击不会切换右侧详情，必须原生点击 .job-card-box
-                link.parent("css:.job-card-wrap").ele("css:.job-card-box").click()
-                browse_sleep(2)
-                check_page(entry)
-                # 详情标题必须对上当前卡片，否则后面的"立即沟通"会发给别的岗位
-                if not wait_detail_title(page, title):
+                resume_path = Path(cfg["resume_path"]).expanduser()
+                if not resume_path.is_absolute():
+                    resume_path = Path(__file__).parent / resume_path
+                resume_text = resume_path.read_text(encoding="utf-8")
+                if not resume_text.strip():
+                    raise ValueError("空简历")
+            except (OSError, UnicodeError, ValueError):
+                stop_reason = "简历不可读或为空"
+                print("🛑 请将 config.resume_path 指向非空 UTF-8 文本简历（.md / .txt；PDF 请先转文本）。")
+                raise SystemExit(2)
+            resume_text = redact_resume(resume_text, cfg["resume_redact"])
+            profile = redact_resume(cfg["job_profile"], cfg["resume_redact"])
+
+        print(f"🎯 Boss直聘 | 岗位: {args.job} | 城市: {args.city} | 目标: {target_count} 份 | 匹配: {args.matcher}")
+        if args.dry_run:
+            print("🧪 dry-run：只浏览和打分，--count 为评分数量上限")
+        if args.fast:
+            print("⚠️  --fast 调试模式：沟通间隔及额外休息均为 3–6 秒")
+        print("🔗 连接 Chrome（端口 9222）...")
+        page = connect_chrome()
+
+        search_url = f"https://www.zhipin.com/web/geek/job?query={args.job}实习&city={city_code}"
+        print(f"📋 打开搜索页：{search_url}")
+        page = page.new_tab(search_url)
+        browse_sleep(6)
+        check_page({"platform": "boss"})
+
+        if "login" in page.url or "user/?ka" in page.url:
+            print("⚠️  请先在浏览器登录后按 Enter...")
+            input()
+            page.get(search_url)
+            browse_sleep(4)
+
+        print(f"🎯 开始{'试跑' if args.dry_run else '投递'}，目标 {target_count} 份\n")
+        page_num = 1
+        while (dry_run_count if args.dry_run else applied_count) < target_count:
+            print(f"── 第 {page_num} 页 ──────────────────────")
+            browse_sleep(3)
+            check_page({"platform": "boss"})
+            cards = page.run_js(CARD_SNAPSHOT_JS, BOSS_JOB_ID_PATTERN) or []
+            if not cards:
+                print("未找到卡片，停止")
+                break
+
+            # 无 ID 卡片用 无ID:公司|标题 占位，避免无限滚动时每页重复记 skipped
+            pending_cards = [c for c in cards if (c["job_id"] or f"无ID:{c['company']}|{c['title']}") not in seen_job_ids]
+            print(f"待处理: {len(pending_cards)} 个")
+            for card in pending_cards:
+                # Jev 达到沟通上限后评完当前批次，剩余推荐写入队列，不再沟通。
+                if ((args.dry_run and dry_run_count >= target_count)
+                        or (args.matcher == "keyword" and not args.dry_run and applied_count >= target_count)):
+                    break
+                job_id, title = card["job_id"], card["title"]
+                company, salary = card["company"], card["salary"]
+                entry = {"platform": "boss", "job_id": job_id, "company": company,
+                         "job": title, "salary": salary,
+                         "url": f"https://www.zhipin.com/job_detail/{job_id}.html" if job_id else ""}
+                seen_key = job_id or f"无ID:{company}|{title}"
+                if seen_key in seen_job_ids:
+                    continue
+                seen_job_ids.add(seen_key)
+                rows.append(entry)
+                key = dedup_key(company, title)
+                boss_key = f"boss:{job_id}"
+
+                skip_reason = ""
+                if not job_id:
+                    skip_reason = "无职位ID"
+                elif is_blacklisted(company, cfg):
+                    skip_reason = "公司黑名单"
+                elif boss_key in applied_index or (key and key in applied_index):
+                    skip_reason = "已投过或待核验（跨运行去重）"
+                elif args.matcher == "jev":
+                    for kw in cfg["exclude_keywords"]:
+                        if kw and kw.lower() in title.lower():
+                            skip_reason = f"标题包含排除词: {kw}"
+                            break
+                if skip_reason:
                     skipped_count += 1
-                    record(log, log_file, "skipped", {**entry, "reason": "详情未切换到该岗位"})
-                    print(f"⏭️  [详情未切换] {company} | {title}")
-                    continue
-                desc_el = page.ele(".job-detail-body") or page.ele(".job-sec-text")
-                if not desc_el:
-                    raise RuntimeError("未找到岗位 JD，未发起沟通")
-                score, reason = score_jd(title, desc_el.text, cfg)
-                entry["score"] = score
-                print(f"[{score:3d}分] {company} | {title} | {salary} | ID={job_id} → {reason}")
-
-                if args.dry_run:
-                    dry_run_count += 1
-                    continue
-                if score < args.min_score:
-                    skipped_count += 1
-                    record(log, log_file, "skipped", {**entry, "reason": reason})
+                    entry.update(decision="skip", reason=skip_reason)
+                    record(log, log_file, "skipped", {**entry, "reason": skip_reason})
+                    print(f"⏭️  [{skip_reason}] {company} | {title} | ID={job_id}")
                     continue
 
-                btn_disabled = page.run_js(
-                    'var b=document.querySelector(".op-btn-chat"); return b ? b.classList.contains("is-disabled") : false;'
-                )
-                if btn_disabled:
-                    skipped_count += 1
-                    record(log, log_file, "skipped", {**entry, "reason": "已沟通过"})
-                    continue
-
-                status, reason, evidence, clicked = start_chat(page, job_id)
-                if status == "blocked":
-                    stop_blocked(reason, entry, evidence)
-                bucket = {"chat_started": "applied", "pending": "pending", "failed": "failed"}[status]
-                record(log, log_file, bucket, {
-                    **entry, "status": status, "reason": reason, "evidence": evidence,
-                    "ts": datetime.now().astimezone().isoformat(),
-                })
-                if status in ("chat_started", "pending"):
-                    applied_index.add(boss_key)
-                    if key:
-                        applied_index.add(key)
-                if status == "chat_started":
-                    applied_count += 1
-                    print(f"  ✅ 接口确认已沟通 ({applied_count}/{target_count})")
-                elif status == "pending":
-                    pending_count += 1
-                    print(f"  ⏳ 待核验，不重试、不计成功：{reason}")
-                else:
-                    print(f"  ❌ 沟通失败：{reason}")
-
-                if clicked:
-                    delay = random.uniform(*(FAST_INTERVAL if args.fast else CHAT_INTERVAL))
-                    print(f"  ⏸️  沟通后休息 {delay:.1f} 秒")
-                    time.sleep(delay)
+                try:
                     check_page(entry)
-                    if status == "chat_started" and applied_count % SUCCESS_REST_EVERY == 0:
-                        delay = random.uniform(*(FAST_INTERVAL if args.fast else SUCCESS_REST))
-                        print(f"  ☕ 每成功 {SUCCESS_REST_EVERY} 份额外休息 {delay:.1f} 秒")
+                    # 按 href 中的完整职位 ID 实时定位卡片，绝不按同名标题匹配。
+                    link = page.ele(
+                        f'css:.job-card-wrap a[href*="job_detail/{job_id}.html"]', timeout=2
+                    )
+                    if not link:
+                        raise RuntimeError(f"未找到职位卡片: {job_id}")
+                    # JS 点击不会切换右侧详情，必须原生点击 .job-card-box
+                    link.parent("css:.job-card-wrap").ele("css:.job-card-box").click()
+                    browse_sleep(2)
+                    check_page(entry)
+                    # 详情标题必须对上当前卡片，否则后面的"立即沟通"会发给别的岗位
+                    if not wait_detail_title(page, title):
+                        skipped_count += 1
+                        entry.update(decision="skip", reason="详情未切换到该岗位")
+                        record(log, log_file, "skipped", {**entry, "reason": "详情未切换到该岗位"})
+                        print(f"⏭️  [详情未切换] {company} | {title}")
+                        continue
+                    desc_el = page.ele(".job-detail-body") or page.ele(".job-sec-text")
+                    if not desc_el:
+                        raise RuntimeError("未找到岗位 JD，未发起沟通")
+                    jd_text = clean_jd(desc_el.text)
+                    if args.dry_run:
+                        dry_run_count += 1
+                        entry["keyword_score"] = score_jd(title, jd_text, cfg)[0]
+                    if args.matcher == "jev":
+                        try:
+                            result = match_job(job_id, jd_text,
+                                               build_state(title, company, jd_text, resume_text, profile),
+                                               jev_key, cache_file)
+                        except JevError:
+                            consecutive_jev_failures += 1
+                            entry.update(decision="review", reason="Jev 调用失败",
+                                         jev={"error": "Jev 调用失败"})
+                            record(log, log_file, "review", {**entry})
+                            print(f"[review] hard=— fit=— action=复核 p=— | {company} | {title} → Jev 调用失败")
+                            if consecutive_jev_failures >= MAX_CONSECUTIVE_FAILURES:
+                                stop_reason = "Jev 连续调用失败 3 次"
+                                print(f"🛑 {stop_reason}，停止脚本。")
+                                raise SystemExit(1)
+                            continue
+                        consecutive_jev_failures = 0
+                        decision = result["decision"]
+                        entry.update(jev=result, decision=decision["decision"], reason=decision["reason"])
+                        metrics = format_result(decision)
+                        print(f"[{decision['decision']}] {metrics} | {company} | {title} → {decision['reason']}")
+                        if entry["decision"] == "review":
+                            record(log, log_file, "review", {**entry})
+                            continue
+                        if entry["decision"] == "skip":
+                            skipped_count += 1
+                            entry["reason"] = f"{decision['reason']}（{metrics}）"
+                            record(log, log_file, "skipped", {**entry})
+                            continue
+                    else:
+                        score, reason = score_jd(title, jd_text, cfg)
+                        entry.update(score=score, decision="apply" if score >= args.min_score else "skip",
+                                     reason=reason)
+                        print(f"[{score:3d}分] {company} | {title} | {salary} | ID={job_id} → {reason}")
+                        # keyword dry-run 保持 P0：评分不写 skipped。
+                        if not args.dry_run and score < args.min_score:
+                            skipped_count += 1
+                            record(log, log_file, "skipped", {**entry, "reason": reason})
+                            continue
+
+                    if args.dry_run or applied_count >= target_count:
+                        if entry["decision"] == "apply":
+                            entry["reason"] += "；dry-run 未沟通" if args.dry_run else "；已达 count 上限，未沟通"
+                        continue
+
+                    btn_disabled = page.run_js(
+                        'var b=document.querySelector(".op-btn-chat"); return b ? b.classList.contains("is-disabled") : false;'
+                    )
+                    if btn_disabled:
+                        skipped_count += 1
+                        entry.update(status="already_contacted", reason="已沟通过")
+                        record(log, log_file, "skipped", {**entry, "reason": "已沟通过"})
+                        continue
+
+                    status, reason, evidence, clicked = start_chat(page, job_id)
+                    entry.update(status=status, reason=reason, attempted=clicked)
+                    if status == "blocked":
+                        stop_blocked(reason, entry, evidence)
+                    bucket = {"chat_started": "applied", "pending": "pending", "failed": "failed"}[status]
+                    record(log, log_file, bucket, {
+                        **entry, "status": status, "reason": reason, "evidence": evidence,
+                        "ts": datetime.now().astimezone().isoformat(),
+                    })
+                    if status in ("chat_started", "pending"):
+                        applied_index.add(boss_key)
+                        if key:
+                            applied_index.add(key)
+                    if status == "chat_started":
+                        applied_count += 1
+                        print(f"  ✅ 接口确认已沟通 ({applied_count}/{target_count})")
+                    elif status == "pending":
+                        pending_count += 1
+                        print(f"  ⏳ 待核验，不重试、不计成功：{reason}")
+                    else:
+                        print(f"  ❌ 沟通失败：{reason}")
+
+                    if clicked:
+                        delay = random.uniform(*(FAST_INTERVAL if args.fast else CHAT_INTERVAL))
+                        print(f"  ⏸️  沟通后休息 {delay:.1f} 秒")
                         time.sleep(delay)
                         check_page(entry)
-                # 仅离开列表页时返回，避免每次沟通都清空无限滚动的位置。
-                if "/web/geek/job" not in page.url:
-                    page.get(search_url)
-                    browse_sleep(4)
+                        if status == "chat_started" and applied_count % SUCCESS_REST_EVERY == 0:
+                            delay = random.uniform(*(FAST_INTERVAL if args.fast else SUCCESS_REST))
+                            print(f"  ☕ 每成功 {SUCCESS_REST_EVERY} 份额外休息 {delay:.1f} 秒")
+                            time.sleep(delay)
+                            check_page(entry)
+                    # 仅离开列表页时返回，避免每次沟通都清空无限滚动的位置。
+                    if "/web/geek/job" not in page.url:
+                        page.get(search_url)
+                        browse_sleep(4)
 
-            except Exception as e:
-                # SystemExit 不会落到这里，风控不能被普通失败处理吞掉。
-                check_page(entry)
-                err = str(e)[:120]
-                print(f"  ❌ 失败: {err}")
-                record(log, log_file, "failed", {**entry, "error": err})
-                browse_sleep(2)
+                except Exception as e:
+                    # SystemExit 不会落到这里，风控不能被普通失败处理吞掉。
+                    check_page(entry)
+                    err = str(e)[:120]
+                    print(f"  ❌ 失败: {err}")
+                    record(log, log_file, "failed", {**entry, "error": err})
+                    browse_sleep(2)
 
-        if (dry_run_count if args.dry_run else applied_count) >= target_count:
-            break
-        # 已见卡片仍须继续滚动，不能因本屏全部去重而漏掉后续岗位。
-        prev_count = len(page.eles(".job-card-wrap"))
-        page.run_js("window.scrollTo(0, document.body.scrollHeight)")
-        browse_sleep(3)
-        check_page({"platform": "boss"})
-        new_count = len(page.eles(".job-card-wrap"))
-        if new_count <= prev_count:
-            print("没有加载到新岗位，停止")
-            break
-        print(f"加载更多：{prev_count} → {new_count} 个")
-        page_num += 1
+            if (dry_run_count if args.dry_run else applied_count) >= target_count:
+                break
+            # 已见卡片仍须继续滚动，不能因本屏全部去重而漏掉后续岗位。
+            prev_count = len(page.eles(".job-card-wrap"))
+            page.run_js("window.scrollTo(0, document.body.scrollHeight)")
+            browse_sleep(3)
+            check_page({"platform": "boss"})
+            new_count = len(page.eles(".job-card-wrap"))
+            if new_count <= prev_count:
+                print("没有加载到新岗位，停止")
+                break
+            print(f"加载更多：{prev_count} → {new_count} 个")
+            page_num += 1
 
-    summary()
+    finally:
+        summary()
 
 
 if __name__ == "__main__":

@@ -7,6 +7,9 @@ resume.docx
 
 # 投递日志
 *-log.json
+jev-cache.json
+jev-cache.json.tmp
+*-队列.md
 
 # Python
 __pycache__/
