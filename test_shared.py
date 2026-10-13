@@ -1,11 +1,13 @@
 """shared.py 公共函数单元测试（不依赖真实浏览器）"""
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from shared import (
     classify_boss_chat_response,
+    cooldown_remaining,
     dedup_key,
     is_blacklisted,
     load_applied_index,
@@ -276,3 +278,34 @@ def test_record_appends_and_persists(tmp_path):
     on_disk = json.loads(log_file.read_text(encoding="utf-8"))
     assert on_disk["applied"][0]["company"] == "腾讯"
     assert on_disk["skipped"][0]["score"] == 10
+
+
+@pytest.mark.parametrize("offset", [-60, 0, 120])
+def test_cooldown_remaining(tmp_path, offset):
+    now = datetime(2026, 10, 14, 12, tzinfo=timezone(timedelta(hours=8)))
+    path = tmp_path / "boss-cooldown.json"
+    assert cooldown_remaining(path, now) is None
+    until = (now + timedelta(minutes=offset)).astimezone(timezone.utc)
+    path.write_text(json.dumps({"until": until.isoformat(), "reason": "验证"}))
+    original = path.read_text()
+    expected = timedelta(minutes=offset) if offset > 0 else None
+    assert cooldown_remaining(path, now) == expected
+    assert path.read_text() == original
+
+
+@pytest.mark.parametrize("content", ["broken", "null", "[]", "{}", '{"until":"bad"}'])
+def test_cooldown_remaining_invalid(tmp_path, content):
+    path = tmp_path / "boss-cooldown.json"
+    path.write_text(content)
+    assert cooldown_remaining(path, datetime.now().astimezone()) is None
+
+
+def test_boss_browse_args_defaults_and_overrides():
+    args = parse_common_args(CITY_CODES, include_matcher=True, argv=["--job", "产品"])
+    assert args.max_views == 60
+    assert args.refresh is args.fill_queue is args.ignore_cooldown is False
+    args = parse_common_args(CITY_CODES, include_matcher=True, argv=[
+        "--job", "产品", "--max-views", "12", "--refresh", "--fill-queue", "--ignore-cooldown",
+    ])
+    assert args.max_views == 12
+    assert args.refresh is args.fill_queue is args.ignore_cooldown is True

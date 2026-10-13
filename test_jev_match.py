@@ -3,6 +3,7 @@
 import copy
 import io
 import json
+from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
 
 import pytest
@@ -161,7 +162,8 @@ def test_cache_hit_and_changed_jd_miss(monkeypatch, tmp_path):
     jev.match_job("job2", "职责一", "private-state", "private-key", path)
     assert len(calls) == 3
     cache = json.loads(path.read_text())
-    assert len(cache) == 3
+    assert len(cache) == 5  # 三份 JD 缓存与两个 latest 索引
+    assert cache["latest:job1"]["decision"] == first["decision"]
     assert set(first) == {"answers", "decision", "ts"}
     assert len(jev.cache_key("job1", "职责一").split(":")[-1]) == 12
     assert "private-" not in path.read_text()
@@ -174,6 +176,118 @@ def test_invalid_cache_is_replaced(monkeypatch, tmp_path):
     assert jev.match_job("1", "JD", "state", "key", path)["decision"]["decision"] == "apply"
     path.write_text(json.dumps({jev.cache_key("1", "JD"): {"answers": {}}}))
     assert jev.match_job("1", "JD", "state", "key", path)["answers"] == answers()
+
+
+@pytest.mark.parametrize("choice,p,skip", [
+    ("1", 0.8, True), ("1", 0.99, True), ("1", 0.799999, False),
+    ("0", 1.0, False), ("0", 0.8, False),
+])
+def test_decide_title(choice, p, skip):
+    answer = {"type": "choice", "choice": choice, "confidence": 0.99,
+              "probabilities": {choice: p, "0" if choice == "1" else "1": 1 - p}}
+    before = copy.deepcopy(answer)
+    assert jev.decide_title(answer) == (skip, f"标题粗筛无关 p={p:.2f}" if skip else "")
+    assert answer == before
+
+
+@pytest.mark.parametrize("answer", [
+    None, [], {}, {"choice": "1"},
+    {"choice": "2", "probabilities": {"0": 1}},
+    {"choice": "1", "probabilities": {"0": 1}},
+    {"choice": [], "probabilities": {"0": 1}},
+    {"choice": "1", "probabilities": {"1": "0.8", "0": 0.2}},
+    {"choice": "1", "probabilities": {"1": True}},
+    {"choice": "1", "probabilities": {"1": float("nan")}},
+    {"choice": "1", "probabilities": {"1": 1.2, "0": -0.2}},
+    {"choice": "1", "probabilities": {"1": 0.8}},
+    {"type": "score", "choice": "1", "probabilities": {"1": 1}},
+])
+def test_decide_title_invalid(answer):
+    with pytest.raises(jev.JevError):
+        jev.decide_title(answer)
+
+
+def test_call_title_jev_contract(monkeypatch):
+    answer = {"type": "choice", "choice": "1", "probabilities": {"1": 0.9, "0": 0.1}}
+
+    def urlopen(req, timeout):
+        payload = json.loads(req.data)
+        assert payload["state"] == "岗位卡片"
+        assert payload["questions"] == jev.TITLE_QUESTIONS
+        assert set(payload["questions"]) == {"title_fit"}
+        assert payload["questions"]["title_fit"]["type"] == "choice"
+        assert set(payload["questions"]["title_fit"]["criteria"]) == {"0", "1"}
+        assert timeout == 5
+        return io.BytesIO(json.dumps({"answers": {"title_fit": answer}}).encode())
+
+    monkeypatch.setattr(jev.request, "urlopen", urlopen)
+    assert jev.call_title_jev("岗位卡片", "offline-key", timeout=5) == answer
+
+
+@pytest.mark.parametrize("body", [b"broken", b"null", b'{"answers": []}',
+                                  b'{"answers": {}}', b'{"answers": {"title_fit": {}}}'])
+def test_call_title_jev_invalid(monkeypatch, body):
+    monkeypatch.setattr(jev.request, "urlopen", lambda *a, **k: io.BytesIO(body))
+    with pytest.raises(jev.JevError):
+        jev.call_title_jev("state", "key")
+
+
+def test_title_cache_hit_refresh_and_invalid_entry(monkeypatch, tmp_path):
+    answer = {"choice": "1", "probabilities": {"1": 0.9, "0": 0.1}}
+    calls = []
+    monkeypatch.setattr(jev, "call_title_jev", lambda *a: calls.append(a) or answer)
+    path = tmp_path / "jev-cache.json"
+    for _ in range(2):
+        assert jev.match_title("a", "private-state", "private-key", path) == (True, "标题粗筛无关 p=0.90")
+    assert len(calls) == 1
+    assert json.loads(path.read_text())["title:a"]["answer"] == answer
+    assert "private-" not in path.read_text()
+    jev.match_title("a", "state", "key", path, refresh=True)
+    assert len(calls) == 2
+    path.write_text(json.dumps({"title:a": {"answer": {}}}))
+    jev.match_title("a", "state", "key", path)
+    assert len(calls) == 3
+
+
+def test_match_job_writes_latest_on_new_and_cached_jd(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(jev, "call_jev", lambda *a: calls.append(a) or answers())
+    path = tmp_path / "jev-cache.json"
+    first = jev.match_job("a", "JD", "state", "key", path)
+    assert json.loads(path.read_text())["latest:a"] == {"decision": first["decision"], "ts": first["ts"]}
+    cache = json.loads(path.read_text())
+    del cache["latest:a"]  # 旧版缓存也能在下次读 JD 后补索引
+    path.write_text(json.dumps(cache))
+    assert jev.match_job("a", "JD", "state", "key", path) == first
+    assert json.loads(path.read_text())["latest:a"]["decision"] == first["decision"]
+    assert len(calls) == 1
+    jev.match_job("a", "JD", "state", "key", path, refresh=True)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("age,hit", [
+    (timedelta(0), True), (timedelta(days=7, microseconds=-1), True),
+    (timedelta(days=7), False), (timedelta(days=8), False), (timedelta(seconds=-1), False),
+])
+def test_latest_match_age(tmp_path, age, hit):
+    now = datetime(2026, 10, 14, tzinfo=timezone.utc)
+    cached = {"decision": jev.decide(answers(hard=0.45)), "ts": (now - age).isoformat()}
+    path = tmp_path / "jev-cache.json"
+    path.write_text(json.dumps({"latest:a": cached}))
+    original = path.read_text()
+    assert jev.latest_match("a", path, now) == (cached if hit else None)
+    assert jev.latest_match("missing", path, now) is None
+    assert path.read_text() == original
+
+
+@pytest.mark.parametrize("entry", [None, {}, {"ts": "bad", "decision": {}},
+                                    {"ts": "2026-10-14T00:00:00+00:00", "decision": {}}])
+def test_latest_match_invalid(tmp_path, entry):
+    path = tmp_path / "jev-cache.json"
+    now = datetime(2026, 10, 14, tzinfo=timezone.utc)
+    assert jev.latest_match("a", path, now) is None
+    path.write_text(json.dumps({"latest:a": entry}))
+    assert jev.latest_match("a", path, now) is None
 
 
 def test_load_key_env_precedes_file(monkeypatch, tmp_path, capsys):

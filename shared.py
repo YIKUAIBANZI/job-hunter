@@ -3,6 +3,7 @@
 import argparse
 import json
 import re
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -44,6 +45,17 @@ def load_log(log_file: Path) -> dict:
 
 def save_log(log: dict, log_file: Path):
     log_file.write_text(json.dumps(log, ensure_ascii=False, indent=2))
+
+
+def cooldown_remaining(path: Path, now: datetime) -> timedelta | None:
+    """读取冷却截止时间；不存在、无效或已过期均返回 None，不修改文件。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        until = datetime.fromisoformat(data["until"])
+        remaining = until.astimezone() - now.astimezone()
+        return remaining if remaining > timedelta(0) else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def parse_boss_job_id(href: str) -> str:
@@ -160,6 +172,10 @@ def parse_common_args(
     p.add_argument("--dry-run", action="store_true", help="仅 Boss：只读 JD 和打分，不沟通")
     p.add_argument("--fast", action="store_true", help="仅 Boss 调试：沟通间隔降至 3–6 秒")
     if include_matcher:
+        p.add_argument("--max-views", type=int, default=60, help="Boss 单轮详情打开次数上限（默认 60）")
+        p.add_argument("--refresh", action="store_true", help="Boss 绕过匹配缓存，重新打开详情并评分")
+        p.add_argument("--fill-queue", action="store_true", help="Boss Jev 投满后继续评完当前批次，补充队列")
+        p.add_argument("--ignore-cooldown", action="store_true", help="Boss 跳过启动时的风控冷却检查")
         p.add_argument("--matcher", choices=("jev", "keyword"), default="jev",
                        help="Boss 匹配器：jev（默认）或 keyword（使用 --min-score）")
         p.add_argument("--job-type", default="实习", help="Boss 求职类型：不限/全职/实习/兼职（默认 实习）")

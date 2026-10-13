@@ -5,7 +5,7 @@ import json
 import math
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.client import HTTPException
 from pathlib import Path
 from urllib import error, request
@@ -17,8 +17,18 @@ HARD_APPLY_THRESHOLD = 0.6
 FIT_SKIP_THRESHOLD = 1.5
 FIT_APPLY_THRESHOLD = 2.3
 ACTION_THRESHOLD = 0.6
+TITLE_SKIP_THRESHOLD = 0.8
+LATEST_MAX_AGE = timedelta(days=7)
 MAX_CONSECUTIVE_FAILURES = 3
 ACTION_LABELS = {"0": "投", "1": "复核", "2": "跳"}
+
+TITLE_QUESTIONS = {
+    "title_fit": {
+        "type": "choice",
+        "instructions": "仅根据岗位标题和标签，这个岗位是否可能是候选人想要的产品/AI产品方向实习？",
+        "criteria": {"0": "可能相关", "1": "明显无关（如销售、剪辑、设计、编剧、标注、教练、客服、纯技术研发）"},
+    },
+}
 
 # 硬条件拆成三问取最小值：合并成一问时概率被压低且不稳定（实测同一 JD 0.27/0.16），
 # 拆开后能说清卡在哪一项。
@@ -146,8 +156,22 @@ def decide(answers: dict) -> dict:
             "fit_ev": fit_ev, "action": action, "action_p": action_p}
 
 
-def call_jev(state: str, key: str, timeout=30) -> dict:
-    payload = {"model": JEV_MODEL, "state": state, "questions": QUESTIONS}
+def decide_title(answer: dict) -> tuple[bool, str]:
+    """只有明确选无关且概率达到阈值才拦截；格式错误交由调用方放行。"""
+    try:
+        if answer.get("type", "choice") != "choice":
+            raise ValueError
+        choice = answer["choice"]
+        probs = _distribution(answer["probabilities"], {"0", "1"})
+        probability = probs[choice]
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise JevError("Jev 标题响应格式错误") from None
+    skip = choice == "1" and probability >= TITLE_SKIP_THRESHOLD
+    return skip, f"标题粗筛无关 p={probability:.2f}" if skip else ""
+
+
+def _request_jev(state: str, key: str, questions: dict, timeout) -> dict:
+    payload = {"model": JEV_MODEL, "state": state, "questions": questions}
     req = request.Request(
         JEV_URL, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
@@ -156,13 +180,27 @@ def call_jev(state: str, key: str, timeout=30) -> dict:
     try:
         with request.urlopen(req, timeout=timeout) as response:
             data = json.loads(response.read())
-        answers = data["answers"]
-        decide(answers)  # 不完整/非数值回答与解析错误一样进入人工复核。
-        return answers
+        return data["answers"]
     except error.HTTPError as exc:
         raise JevError(f"Jev HTTP 错误 {exc.code}") from None
     except (OSError, HTTPException, ValueError, TypeError, KeyError):
         raise JevError("Jev 网络或解析失败") from None
+
+
+def call_jev(state: str, key: str, timeout=30) -> dict:
+    answers = _request_jev(state, key, QUESTIONS, timeout)
+    decide(answers)  # 不完整/非数值回答与解析错误一样进入人工复核。
+    return answers
+
+
+def call_title_jev(state: str, key: str, timeout=30) -> dict:
+    answers = _request_jev(state, key, TITLE_QUESTIONS, timeout)
+    try:
+        answer = answers["title_fit"]
+    except (KeyError, TypeError):
+        raise JevError("Jev 标题响应格式错误") from None
+    decide_title(answer)
+    return answer
 
 
 def cache_key(job_id: str, jd_text: str) -> str:
@@ -170,29 +208,72 @@ def cache_key(job_id: str, jd_text: str) -> str:
     return f"boss:{job_id}:{digest}"
 
 
-def match_job(job_id, jd_text, state, key, cache_file: Path) -> dict:
-    """缓存仅保存 answers/decision/ts，不保存简历、JD、state 或密钥。"""
+def _load_cache(cache_file: Path) -> dict:
     try:
         cache = json.loads(cache_file.read_text(encoding="utf-8"))
-        if not isinstance(cache, dict):
-            cache = {}
+        return cache if isinstance(cache, dict) else {}
     except (OSError, ValueError):
-        cache = {}
-    entry_key = cache_key(job_id, jd_text)
-    cached = cache.get(entry_key)
-    if isinstance(cached, dict) and "answers" in cached:
-        try:
-            # 阈值调整后仍用缓存 answers 按当前规则决策。
-            return {**cached, "decision": decide(cached["answers"])}
-        except JevError:
-            pass
-    answers = call_jev(state, key)
-    result = {"answers": answers, "decision": decide(answers),
-              "ts": datetime.now().astimezone().isoformat()}
-    cache[entry_key] = result
+        return {}
+
+
+def _save_cache(cache: dict, cache_file: Path):
     temp = cache_file.with_suffix(".json.tmp")
     temp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(cache_file)
+
+
+def latest_match(job_id: str, cache_file: Path, now: datetime | None = None) -> dict | None:
+    """仅返回 7 天内完整的最新决策；读取不延长缓存有效期。"""
+    cached = _load_cache(cache_file).get(f"latest:{job_id}")
+    try:
+        age = (now or datetime.now().astimezone()) - datetime.fromisoformat(cached["ts"])
+        decision = cached["decision"]
+        if (timedelta(0) <= age < LATEST_MAX_AGE
+                and decision["decision"] in ("apply", "skip", "review")
+                and isinstance(decision["reason"], str)):
+            return cached
+    except (KeyError, TypeError, ValueError):
+        pass
+    return None
+
+
+def match_title(job_id, state, key, cache_file: Path, *, refresh=False) -> tuple[bool, str]:
+    cache = _load_cache(cache_file)
+    entry_key = f"title:{job_id}"
+    cached = cache.get(entry_key)
+    if not refresh and isinstance(cached, dict) and "answer" in cached:
+        try:
+            return decide_title(cached["answer"])
+        except JevError:
+            pass
+    answer = call_title_jev(state, key)
+    result = decide_title(answer)
+    cache[entry_key] = {"answer": answer, "ts": datetime.now().astimezone().isoformat()}
+    _save_cache(cache, cache_file)
+    return result
+
+
+def match_job(job_id, jd_text, state, key, cache_file: Path, *, refresh=False) -> dict:
+    """缓存仅保存 answers/decision/ts，不保存简历、JD、state 或密钥。"""
+    cache = _load_cache(cache_file)
+    entry_key = cache_key(job_id, jd_text)
+    cached = cache.get(entry_key)
+    result = None
+    if not refresh and isinstance(cached, dict) and "answers" in cached:
+        try:
+            # 阈值调整后仍用缓存 answers 按当前规则决策。
+            result = {**cached, "decision": decide(cached["answers"])}
+        except JevError:
+            pass
+    if result is None:
+        answers = call_jev(state, key)
+        result = {"answers": answers, "decision": decide(answers)}
+    now = datetime.now().astimezone().isoformat()
+    result.setdefault("ts", now)
+    cache[entry_key] = result
+    # 只有实际读过 JD 才续期；旧答案可复用，但索引记录本次确认 JD 的时间。
+    cache[f"latest:{job_id}"] = {"decision": result["decision"], "ts": now}
+    _save_cache(cache, cache_file)
     return result
 
 

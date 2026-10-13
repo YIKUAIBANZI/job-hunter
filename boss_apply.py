@@ -4,7 +4,7 @@
 import json
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
@@ -14,8 +14,10 @@ from jev_match import (
     build_state,
     clean_jd,
     format_result,
+    latest_match,
     load_jev_key,
     match_job,
+    match_title,
     redact_resume,
     render_queue_md,
 )
@@ -23,6 +25,7 @@ from shared import (
     BOSS_JOB_ID_PATTERN,
     classify_boss_chat_response,
     connect_chrome,
+    cooldown_remaining,
     dedup_key,
     is_blacklisted,
     load_applied_index,
@@ -82,6 +85,11 @@ CHAT_INTERVAL = (30, 90)
 FAST_INTERVAL = (3, 6)
 SUCCESS_REST_EVERY = 5
 SUCCESS_REST = (180, 300)
+VIEW_INTERVAL = (6, 15)
+VIEW_REST_EVERY = 10
+VIEW_REST = (45, 90)
+FAST_VIEW_INTERVAL = (1, 3)
+FAST_VIEW_REST = (3, 6)
 BROWSE_JITTER = 0.25
 
 # 一次读取整页卡片；与纯函数共用职位路径正则，避免两套 ID 提取规则漂移。
@@ -99,9 +107,16 @@ CARD_SNAPSHOT_JS = """
         }
         const text = selector => c.querySelector(selector)?.textContent.trim() || '';
         return {job_id, title: text('.job-name'),
-                company: text('.company-name') || text('.boss-name'), salary: text('.job-salary')};
+                company: text('.company-name') || text('.boss-name'), salary: text('.job-salary'),
+                tags: Array.from(c.querySelectorAll('.tag-list > *')).map(t => t.textContent.trim())};
     });
 """
+
+
+def pick_boss_tab(tabs):
+    """按现有顺序选第一个 Boss 岗位列表标签，不操作浏览器。"""
+    return next((tab for tab in tabs if any(path in (tab.url or "") for path in (
+        "zhipin.com/web/geek/jobs", "zhipin.com/web/geek/job"))), None)
 
 
 def browse_sleep(seconds):
@@ -261,6 +276,17 @@ def main():
     log_file = Path(__file__).parent / f"boss-{args.city}-log.json"
     queue_file = log_file.with_name(f"boss-{args.city}-队列.md")
     cache_file = log_file.with_name("jev-cache.json")
+    cooldown_file = log_file.with_name("boss-cooldown.json")
+    if not args.ignore_cooldown:
+        remaining = cooldown_remaining(cooldown_file, datetime.now().astimezone())
+        if remaining is not None:
+            try:
+                reason = json.loads(cooldown_file.read_text(encoding="utf-8")).get("reason", "风控冷却")
+            except (OSError, ValueError, AttributeError):
+                reason = "风控冷却"
+            minutes = int(remaining.total_seconds() / 60) + 1
+            print(f"🛑 Boss 风控冷却中，剩余约 {minutes} 分钟：{reason}；未连接浏览器。")
+            raise SystemExit(2)
 
     log = load_log(log_file)
     applied_index = load_applied_index()
@@ -268,6 +294,7 @@ def main():
     pending_count = 0
     skipped_count = 0
     dry_run_count = 0
+    view_count = 0
     seen_job_ids = set()
     target_count = args.count
     rows = []
@@ -284,6 +311,9 @@ def main():
         queue_file.write_text(render_queue_md(rows, stats), encoding="utf-8")
         print_summary("Boss直聘", applied_count, skipped_count, log_file, pending=pending_count)
         print(f"📋 推荐: {stats['apply']} 份  复核: {stats['review']} 份 | 队列: {queue_file}")
+        print(f"👀 本轮打开详情: {view_count}/{args.max_views}")
+        if stop_reason:
+            print(f"停止原因：{stop_reason}")
         if args.dry_run:
             print(f"🧪 dry-run 已评分: {dry_run_count} 份（仅打印，未发起沟通）")
 
@@ -291,6 +321,14 @@ def main():
         nonlocal stop_reason
         stop_reason = reason
         entry.update(status="blocked", reason=reason)
+        now = datetime.now().astimezone()
+        try:
+            cooldown_file.write_text(json.dumps({
+                "until": (now + timedelta(hours=2)).isoformat(), "reason": reason,
+                "page_url": evidence.get("page_url") or page.url,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            print("⚠️  冷却文件写入失败，本次仍立即终止。")
         record(log, log_file, "failed", {
             **entry, "status": "blocked", "reason": reason,
             "evidence": evidence, "ts": datetime.now().astimezone().isoformat(),
@@ -302,6 +340,18 @@ def main():
         reason = page_block_reason(page)
         if reason:
             stop_blocked(reason, entry, {"packets": [], "page_url": page.url, "page_blocked": reason})
+
+    def rest_after_view(entry):
+        check_page(entry)  # 风控时立即退出，不等待休息。
+        delay = random.uniform(*(FAST_VIEW_INTERVAL if args.fast else VIEW_INTERVAL))
+        print(f"  👀 详情读取后休息 {delay:.1f} 秒（本轮 {view_count}/{args.max_views}）")
+        time.sleep(delay)
+        check_page(entry)
+        if view_count % VIEW_REST_EVERY == 0:
+            delay = random.uniform(*(FAST_VIEW_REST if args.fast else VIEW_REST))
+            print(f"  ☕ 每浏览 {VIEW_REST_EVERY} 份额外休息 {delay:.1f} 秒")
+            time.sleep(delay)
+            check_page(entry)
 
     try:
         jev_key, resume_text, profile = "", "", ""
@@ -329,13 +379,17 @@ def main():
         if args.dry_run:
             print("🧪 dry-run：只浏览和打分，--count 为评分数量上限")
         if args.fast:
-            print("⚠️  --fast 调试模式：沟通间隔及额外休息均为 3–6 秒")
+            print("⚠️  --fast 调试模式：详情间隔 1–3 秒，沟通间隔及额外休息 3–6 秒")
         print("🔗 连接 Chrome（端口 9222）...")
-        page = connect_chrome()
+        browser = connect_chrome()
 
         search_url = build_search_url(args.job, city_code, args.job_type, args.experience, args.degree)
         print(f"📋 打开搜索页：{search_url}")
-        page = page.new_tab(search_url)
+        page = pick_boss_tab(browser.get_tabs())
+        if page is None:
+            page = browser.new_tab(search_url)
+        else:
+            page.get(search_url)
         browse_sleep(6)
         check_page({"platform": "boss"})
 
@@ -360,9 +414,13 @@ def main():
             pending_cards = [c for c in cards if (c["job_id"] or f"无ID:{c['company']}|{c['title']}") not in seen_job_ids]
             print(f"待处理: {len(pending_cards)} 个")
             for card in pending_cards:
-                # Jev 达到沟通上限后评完当前批次，剩余推荐写入队列，不再沟通。
+                if view_count >= args.max_views:
+                    stop_reason = f"已达 --max-views 上限（{args.max_views}），停止扫描"
+                    break
+                # --fill-queue 保留 Jev 投满后评完当前批次的旧行为。
                 if ((args.dry_run and dry_run_count >= target_count)
-                        or (args.matcher == "keyword" and not args.dry_run and applied_count >= target_count)):
+                        or (not args.dry_run and applied_count >= target_count
+                            and (not args.fill_queue or args.matcher == "keyword"))):
                     break
                 job_id, title = card["job_id"], card["title"]
                 company, salary = card["company"], card["salary"]
@@ -397,6 +455,35 @@ def main():
                     continue
 
                 try:
+                    if args.matcher == "jev":
+                        cached = None if args.refresh else latest_match(job_id, cache_file)
+                        if cached and cached["decision"]["decision"] in ("skip", "review"):
+                            decision = cached["decision"]
+                            entry.update(jev=cached, decision=decision["decision"],
+                                         reason=f"[缓存] {decision['reason']}")
+                            if entry["decision"] == "skip":
+                                skipped_count += 1
+                            if args.dry_run:
+                                dry_run_count += 1
+                            record(log, log_file, "skipped" if entry["decision"] == "skip" else "review", {**entry})
+                            print(f"[{entry['decision']}] {company} | {title} → {entry['reason']}")
+                            continue
+                        title_state = (f"【岗位卡片】{title}｜{company}｜{salary}｜标签: {card.get('tags', [])}\n"
+                                       f"【求职偏好】{profile}")
+                        try:
+                            title_skip, title_reason = match_title(
+                                job_id, title_state, jev_key, cache_file, refresh=args.refresh)
+                        except JevError:
+                            title_skip = False
+                            print(f"  标题粗筛失败，继续读取 JD：{company} | {title}")
+                        if title_skip:
+                            skipped_count += 1
+                            if args.dry_run:
+                                dry_run_count += 1
+                            entry.update(decision="skip", reason=title_reason)
+                            record(log, log_file, "skipped", {**entry})
+                            print(f"⏭️  [{title_reason}] {company} | {title}")
+                            continue
                     check_page(entry)
                     # 按 href 中的完整职位 ID 实时定位卡片，绝不按同名标题匹配。
                     link = page.ele(
@@ -405,20 +492,26 @@ def main():
                     if not link:
                         raise RuntimeError(f"未找到职位卡片: {job_id}")
                     # JS 点击不会切换右侧详情，必须原生点击 .job-card-box
-                    link.parent("css:.job-card-wrap").ele("css:.job-card-box").click()
-                    browse_sleep(2)
-                    check_page(entry)
-                    # 详情标题必须对上当前卡片，否则后面的"立即沟通"会发给别的岗位
-                    if not wait_detail_title(page, title):
-                        skipped_count += 1
-                        entry.update(decision="skip", reason="详情未切换到该岗位")
-                        record(log, log_file, "skipped", {**entry, "reason": "详情未切换到该岗位"})
-                        print(f"⏭️  [详情未切换] {company} | {title}")
-                        continue
-                    desc_el = page.ele(".job-detail-body") or page.ele(".job-sec-text")
-                    if not desc_el:
-                        raise RuntimeError("未找到岗位 JD，未发起沟通")
-                    jd_text = clean_jd(desc_el.text)
+                    box = link.parent("css:.job-card-wrap").ele("css:.job-card-box")
+                    view_count += 1
+                    try:
+                        box.click()
+                        browse_sleep(2)
+                        check_page(entry)
+                        # 详情标题必须对上当前卡片，否则后面的"立即沟通"会发给别的岗位
+                        if not wait_detail_title(page, title):
+                            skipped_count += 1
+                            entry.update(decision="skip", reason="详情未切换到该岗位")
+                            record(log, log_file, "skipped", {**entry, "reason": "详情未切换到该岗位"})
+                            print(f"⏭️  [详情未切换] {company} | {title}")
+                            continue
+                        desc_el = page.ele(".job-detail-body") or page.ele(".job-sec-text")
+                        if not desc_el:
+                            raise RuntimeError("未找到岗位 JD，未发起沟通")
+                        jd_text = clean_jd(desc_el.text)
+                    finally:
+                        if entry.get("status") != "blocked":
+                            rest_after_view(entry)
                     if args.dry_run:
                         dry_run_count += 1
                         entry["keyword_score"] = score_jd(title, jd_text, cfg)[0]
@@ -426,7 +519,7 @@ def main():
                         try:
                             result = match_job(job_id, jd_text,
                                                build_state(title, company, jd_text, resume_text, profile),
-                                               jev_key, cache_file)
+                                               jev_key, cache_file, refresh=args.refresh)
                         except JevError:
                             consecutive_jev_failures += 1
                             entry.update(decision="review", reason="Jev 调用失败",
@@ -498,6 +591,9 @@ def main():
                     else:
                         print(f"  ❌ 沟通失败：{reason}")
 
+                    if applied_count >= target_count and (not args.fill_queue or args.matcher == "keyword"):
+                        stop_reason = f"已达 --count 上限（{target_count}），停止扫描"
+                        break
                     if clicked:
                         delay = random.uniform(*(FAST_INTERVAL if args.fast else CHAT_INTERVAL))
                         print(f"  ⏸️  沟通后休息 {delay:.1f} 秒")
@@ -521,6 +617,9 @@ def main():
                     record(log, log_file, "failed", {**entry, "error": err})
                     browse_sleep(2)
 
+            if view_count >= args.max_views:
+                stop_reason = stop_reason or f"已达 --max-views 上限（{args.max_views}），停止扫描"
+                break
             if (dry_run_count if args.dry_run else applied_count) >= target_count:
                 break
             # 已见卡片仍须继续滚动，不能因本屏全部去重而漏掉后续岗位。

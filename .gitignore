@@ -22,3 +22,4 @@ chrome-debug/
 
 # macOS
 .DS_Store
+boss-cooldown.json
