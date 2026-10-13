@@ -22,3 +22,5 @@ chrome-debug/
 
 # macOS
 .DS_Store
+official-cache.json
+官网投递.md
