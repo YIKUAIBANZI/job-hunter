@@ -274,6 +274,47 @@ def test_missing_key_exits_before_browser(harness, monkeypatch, capsys):
     assert not h.calls and not h.chats
 
 
+@pytest.mark.parametrize('missing', ['key', 'base_url', 'model'])
+def test_llm_missing_settings_exits_without_browser(harness, monkeypatch, capsys, missing):
+    settings = {'base_url': 'https://example.com/v1', 'model': 'cheap'}
+    if missing != 'key':
+        settings[missing] = ''
+    h = harness([card('a')], matcher='llm', llm=settings)
+    monkeypatch.setattr(boss.llm_match, 'load_llm_key', lambda *a: '' if missing == 'key' else 'offline-only-key')
+    monkeypatch.setattr(boss, 'connect_chrome', lambda: pytest.fail('缺配置不得连接浏览器'))
+    try:
+        with pytest.raises(SystemExit) as exc:
+            h.run('--dry-run')
+        assert exc.value.code == 2
+        assert 'config_tool.py check' in capsys.readouterr().out
+        assert not h.calls and not h.chats
+    finally:
+        jev.configure({})
+
+
+def test_boss_llm_default_city_and_isolated_cache(harness, monkeypatch, tmp_path):
+    settings = {'base_url': 'https://example.com/v1', 'model': 'cheap'}
+    h = harness([card('a')], matcher='llm', llm=settings, city='杭州')
+    monkeypatch.setattr(boss.llm_match, 'load_llm_key', lambda *a: 'offline-only-key')
+    try:
+        # 未传 city/matcher，入口必须使用配置。
+        monkeypatch.setattr(sys, 'argv', ['boss_apply.py', '--job', '产品经理', '--dry-run'])
+        boss.main()
+        assert 'city=101210100' in h.page.navigations[-1]
+        assert (tmp_path/'boss-杭州-队列.md').exists()
+        path = tmp_path/'llm-cache.json'
+        raw = path.read_text()
+        assert 'llm:' in raw and not (tmp_path/'jev-cache.json').exists()
+        assert len(h.calls) == 1
+        # CLI 覆盖配置；Jev 保持老文件与原始职位键。
+        h.run('--dry-run', '--matcher', 'jev')
+        assert (tmp_path/'jev-cache.json').exists()
+        assert 'latest:a' in (tmp_path/'jev-cache.json').read_text()
+        assert len(h.calls) == 2
+    finally:
+        jev.configure({})
+
+
 @pytest.mark.parametrize("dry_run", [True, False])
 def test_keyword_preserves_score_filter_and_dry_run_logs(harness, monkeypatch, dry_run):
     h = harness([card("a", jd="资深导师带教"), card("b", jd="产品实习"), card("c")])

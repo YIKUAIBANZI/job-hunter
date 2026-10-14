@@ -39,3 +39,5 @@ boss-greet.json
 # 校准证据含投递公司/职位，仅本地保留
 evidence/*.json
 evidence/platform-validation-*.md
+llm-cache.json*
+llm-*-cache.json*

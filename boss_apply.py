@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
+import llm_match
 
 from apply_runtime import (CHAT_INTERVAL, SUCCESS_REST_EVERY, SUCCESS_REST,
                            VIEW_INTERVAL, VIEW_REST_EVERY, VIEW_REST,
@@ -17,6 +18,7 @@ from platform_runner import effective_decision
 from jev_match import (
     MAX_CONSECUTIVE_FAILURES,
     JevError,
+    backend_cache_id,
     build_state,
     clean_jd,
     format_result,
@@ -426,17 +428,19 @@ def run_approved(args, cfg, root, *, rest=paced_rest):
 
 def main():
     cfg = load_config()
-    configure_jev(cfg)
     args = parse_common_args(
         CITY_CODES,
         default_count=cfg["default_count"],
         default_min_score=cfg["min_score"],
+        default_city=cfg.get("city", "深圳"),
+        default_matcher=cfg.get("matcher", "jev"),
         include_matcher=True,
     )
+    configure_jev({**cfg, "matcher": args.matcher})
     city_code = CITY_CODES.get(args.city, "100010000")
     log_file = Path(__file__).parent / f"boss-{args.city}-log.json"
     queue_file = log_file.with_name(f"boss-{args.city}-队列.md")
-    cache_file = log_file.with_name("jev-cache.json")
+    cache_file = log_file.with_name("llm-cache.json" if args.matcher == "llm" else "jev-cache.json")
     cooldown_file = log_file.with_name("boss-cooldown.json")
     if not args.ignore_cooldown:
         remaining = cooldown_remaining(cooldown_file, datetime.now().astimezone())
@@ -519,12 +523,21 @@ def main():
 
     try:
         jev_key, resume_text, profile = "", "", ""
-        if args.matcher == "jev":
-            jev_key = load_jev_key()
-            if not jev_key:
-                stop_reason = "缺少 JEV_API_KEY"
-                print("🛑🛑 Jev 模式缺少 JEV_API_KEY：请配置环境变量或 ~/.config/jobhunter/jev.env；未启动浏览器，不会降级。")
-                raise SystemExit(2)
+        if args.matcher in ("jev", "llm"):
+            if args.matcher == "llm":
+                settings = {**llm_match.DEFAULT_SETTINGS,
+                            **(cfg["llm"] if isinstance(cfg.get("llm"), dict) else {})}
+                jev_key = llm_match.load_llm_key(settings)
+                if not jev_key or not llm_match.settings_ready(settings):
+                    stop_reason = "LLM 缺少 base_url/model 或密钥"
+                    print("🛑 LLM 配置不完整：请运行 python3 config_tool.py check；未启动浏览器，不会降级。")
+                    raise SystemExit(2)
+            else:
+                jev_key = load_jev_key()
+                if not jev_key:
+                    stop_reason = "缺少 JEV_API_KEY"
+                    print("🛑🛑 Jev 模式缺少 JEV_API_KEY：请运行 python3 config_tool.py check；未启动浏览器，不会降级。")
+                    raise SystemExit(2)
             try:
                 resume_path = Path(cfg["resume_path"]).expanduser()
                 if not resume_path.is_absolute():
@@ -606,7 +619,7 @@ def main():
                     skip_reason = "公司黑名单"
                 elif boss_key in applied_index or (key and key in applied_index):
                     skip_reason = "已投过或待核验（跨运行去重）"
-                elif args.matcher == "jev":
+                elif args.matcher in ("jev", "llm"):
                     for kw in cfg["exclude_keywords"]:
                         if kw and kw.lower() in title.lower():
                             skip_reason = f"标题包含排除词: {kw}"
@@ -619,8 +632,9 @@ def main():
                     continue
 
                 try:
-                    if args.matcher == "jev":
-                        cached = None if args.refresh else latest_match(job_id, cache_file)
+                    cache_id = backend_cache_id(job_id)
+                    if args.matcher in ("jev", "llm"):
+                        cached = None if args.refresh else latest_match(cache_id, cache_file)
                         if cached and cached["decision"]["decision"] in ("skip", "review"):
                             decision = cached["decision"]
                             entry.update(jev=cached, decision=decision["decision"],
@@ -638,7 +652,7 @@ def main():
                         try:
                             if not title_protected(title):
                                 title_skip, title_reason = match_title(
-                                    job_id, title_state, jev_key, cache_file, refresh=args.refresh)
+                                    cache_id, title_state, jev_key, cache_file, refresh=args.refresh)
                         except JevError:
                             title_skip = False
                             print(f"  标题粗筛失败，继续读取 JD：{company} | {title}")
@@ -681,9 +695,9 @@ def main():
                     if args.dry_run:
                         dry_run_count += 1
                         entry["keyword_score"] = score_jd(title, jd_text, cfg)[0]
-                    if args.matcher == "jev":
+                    if args.matcher in ("jev", "llm"):
                         try:
-                            result = match_job(job_id, jd_text,
+                            result = match_job(cache_id, jd_text,
                                                build_state(title, company, jd_text, resume_text, profile),
                                                jev_key, cache_file, refresh=args.refresh)
                         except JevError:

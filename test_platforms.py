@@ -245,6 +245,90 @@ def test_cache_context_changes():
     assert runner.cache_scope('51job',cfg,'a','x') != runner.cache_scope('liepin',cfg,'a','x')
 
 
+def test_jev_scope_exact_legacy_payload_and_llm_isolation():
+    import hashlib
+    jev = runner.jev
+    cfg = {'exclude_keywords': ['总监']}
+    try:
+        jev.configure({})
+        # 改动前原始算法；不得给 Jev 增加空后端字段。
+        payload = json.dumps(['简历', '偏好', cfg.get('exclude_keywords'),
+                              jev.QUESTIONS, jev.TITLE_QUESTIONS, jev.JEV_MODEL,
+                              [jev.HARD_SKIP_THRESHOLD, jev.HARD_APPLY_THRESHOLD, jev.FIT_SKIP_THRESHOLD,
+                               jev.FIT_APPLY_THRESHOLD, jev.ACTION_THRESHOLD, jev.TITLE_SKIP_THRESHOLD],
+                              'multi-platform-v1'], ensure_ascii=False, sort_keys=True)
+        expected = 'liepin:' + hashlib.sha256(payload.encode()).hexdigest()[:16]
+        assert runner.cache_scope('liepin', cfg, '简历', '偏好') == expected
+        jev.configure({'matcher': 'llm', 'llm': {'base_url': 'https://example.com/v1', 'model': 'cheap'}})
+        first = runner.cache_scope('liepin', cfg, '简历', '偏好')
+        assert first != expected
+        jev.configure({'matcher': 'llm', 'llm': {'base_url': 'https://other.com/v1', 'model': 'cheap'}})
+        assert runner.cache_scope('liepin', cfg, '简历', '偏好') != first
+        jev.configure({'matcher': 'llm', 'llm': {'base_url': 'https://example.com/v1', 'model': 'other'}})
+        assert runner.cache_scope('liepin', cfg, '简历', '偏好') != first
+    finally:
+        jev.configure({})
+
+
+@pytest.mark.parametrize('platform', ['liepin', 'yingjiesheng', '51job', 'yupao'])
+def test_main_reads_city_and_matcher_defaults(monkeypatch, platform):
+    cfg = {'default_count': 2, 'min_score': 60, 'city': '杭州', 'matcher': 'llm'}
+    monkeypatch.setattr(runner, 'load_config', lambda: cfg)
+    def execute(p, a, config, adapter, root):
+        assert a.city == '杭州' and a.matcher == 'llm'
+        assert runner.jev.BACKEND == 'llm' and adapter.browser is None
+        return {'views': 0}
+    monkeypatch.setattr(runner, 'execute', execute)
+    try:
+        assert runner.main(platform, {'深圳': '123', '杭州': '456'}, ['--job', '运营']) == {'views': 0}
+    finally:
+        runner.jev.configure({})
+
+
+@pytest.mark.parametrize('missing', ['key', 'base_url', 'model'])
+def test_llm_missing_configuration_exits_without_browser(tmp_path, monkeypatch, missing, capsys):
+    cfg = config(tmp_path)
+    cfg['llm'].update(base_url='https://example.com/v1', model='cheap')
+    if missing != 'key':
+        cfg['llm'][missing] = ''
+    monkeypatch.setattr(runner.llm_match, 'load_llm_key', lambda *a: '' if missing == 'key' else 'offline-key')
+    adapter = FakeAdapter()
+    try:
+        stats = runner.execute('liepin', args('--dry-run', '--matcher', 'llm'), cfg, adapter, tmp_path, rest=lambda *a: None)
+        assert adapter.searches == 0 and 'config_tool.py check' in stats['stop_reason']
+    finally:
+        runner.jev.configure({})
+
+
+def test_llm_runner_reuses_review_gate_cache_and_three_failure_stop(tmp_path, monkeypatch):
+    from test_llm_match import full_answers, response
+    cfg = config(tmp_path)
+    cfg.update(resume_path='resume.txt', resume_redact=['张三'])
+    cfg['llm'].update(base_url='https://example.com/v1', model='cheap')
+    (tmp_path/'resume.txt').write_text('张三 13812345678\n运营与产品项目')
+    monkeypatch.setattr(runner.llm_match, 'load_llm_key', lambda *a: 'offline-key')
+    requests = []
+    raw = full_answers()
+    raw['action'].update(choice='1', probabilities={'0': 0, '1': 1, '2': 0})
+    def urlopen(req, **kw):
+        requests.append(req)
+        assert '张三' not in req.data.decode() and '13812345678' not in req.data.decode()
+        return response(json.dumps(raw))
+    monkeypatch.setattr(runner.jev.request, 'urlopen', urlopen)
+    try:
+        stats = runner.execute('liepin', args('--dry-run', '--matcher', 'llm'), cfg, FakeAdapter(), tmp_path, rest=lambda *a: None)
+        assert stats['review'] == 2 and not stats['applied'] and len(requests) == 2
+        assert (tmp_path/'llm-liepin-cache.json').exists() and not (tmp_path/'jev-liepin-cache.json').exists()
+        runner.execute('liepin', args('--dry-run', '--matcher', 'llm'), cfg, FakeAdapter(), tmp_path, rest=lambda *a: None)
+        assert len(requests) == 2
+        monkeypatch.setattr(runner.jev.request, 'urlopen', lambda *a, **kw: response('{}'))
+        stats = runner.execute('liepin', args('--dry-run', '--matcher', 'llm', '--refresh', '--count', '5'), cfg,
+                               FakeAdapter(), tmp_path, rest=lambda *a: None)
+        assert stats['review'] == 3 and '3' in stats['stop_reason']
+    finally:
+        runner.jev.configure({})
+
+
 def test_review_policy_preserves_raw_jev_result():
     result={'decision':{'decision':'apply','action':'1','reason':'方案B'}}
     assert runner.effective_decision(result,'review-gate')['decision']=='review'

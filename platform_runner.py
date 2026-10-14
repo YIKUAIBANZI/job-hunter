@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 import jev_match as jev
+import llm_match
 from apply_runtime import (CHAT_INTERVAL, SUCCESS_REST, SUCCESS_REST_EVERY,
                            PLATFORM_PACING,
                            paced_rest, submit, write_cooldown)
@@ -21,15 +22,16 @@ class StopRun(Exception):
     pass
 
 
-def parse_args(city_codes, argv=None, *, platform='liepin', default_count=20, default_min_score=60):
+def parse_args(city_codes, argv=None, *, platform='liepin', default_count=20, default_min_score=60,
+               default_city='深圳', default_matcher='jev'):
     p = argparse.ArgumentParser(description='点击 + 核验：默认 Jev；先运行 --dry-run')
     p.add_argument('--job', default='', help='搜索岗位名（--approved 时不需要）')
     p.add_argument('--approved', action='store_true', help='只投递复核清单中本平台的人工批准岗位，不搜索、不调 Jev')
     p.add_argument('--job-id', default='', help='仅处理指定职位 ID；首单授权时锁定岗位')
-    p.add_argument('--city', default='深圳', choices=list(city_codes))
+    p.add_argument('--city', default=default_city, choices=list(city_codes))
     p.add_argument('--count', type=int, default=default_count, help='真投成功目标；dry-run 最多评估岗位数')
     p.add_argument('--dry-run', action='store_true', help='只读和评估，绝不提交')
-    p.add_argument('--matcher', choices=('jev', 'keyword'), default='jev')
+    p.add_argument('--matcher', choices=('jev', 'llm', 'keyword'), default=default_matcher)
     p.add_argument('--min-score', type=int, default=default_min_score)
     p.add_argument('--match-policy', choices=('review-gate', 'boss-b'), default='review-gate',
                    help='默认 Jev 建议复核不自动投；boss-b 保留交接方案 B')
@@ -43,6 +45,8 @@ def parse_args(city_codes, argv=None, *, platform='liepin', default_count=20, de
     p.add_argument('--fill-queue', action='store_true')
     p.add_argument('--calibrate', action='store_true', help='用户授权后仅真投 1 次，采集首单核验证据')
     args = p.parse_args(argv)
+    if args.city not in city_codes or args.matcher not in ('jev', 'llm', 'keyword'):
+        p.error('配置中的 city/matcher 无效，请运行 python3 config_tool.py check')
     if platform == 'yingjiesheng' and any((args.job_type, args.experience, args.degree)):
         p.error(YJS_FILTER_REASON)
     if args.approved and platform == '51job':
@@ -66,11 +70,14 @@ def parse_args(city_codes, argv=None, *, platform='liepin', default_count=20, de
 
 def cache_scope(platform, cfg, resume, profile):
     # 缓存随简历、偏好、问题/阈值版本变化失效，缓存里不写个人原文。
-    payload = json.dumps([resume, profile, cfg.get('exclude_keywords'),
+    values = [resume, profile, cfg.get('exclude_keywords'),
                           jev.QUESTIONS, jev.TITLE_QUESTIONS, jev.JEV_MODEL,
                           [jev.HARD_SKIP_THRESHOLD, jev.HARD_APPLY_THRESHOLD, jev.FIT_SKIP_THRESHOLD,
                            jev.FIT_APPLY_THRESHOLD, jev.ACTION_THRESHOLD, jev.TITLE_SKIP_THRESHOLD],
-                          'multi-platform-v1'], ensure_ascii=False, sort_keys=True)
+                          'multi-platform-v1']
+    if jev.BACKEND == 'llm':
+        values.extend(['llm', jev.LLM_SETTINGS['base_url'], jev.LLM_SETTINGS['model']])
+    payload = json.dumps(values, ensure_ascii=False, sort_keys=True)
     return platform + ':' + hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -82,6 +89,8 @@ def effective_decision(result, policy):
 
 
 def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
+    # CLI 显式选项优先；直接调用 execute 的离线测试也使用本轮配置。
+    jev.configure({**cfg, 'matcher': args.matcher})
     pacing = PLATFORM_PACING[platform]
     log_file = root / f'{platform}-{args.city}-log.json'
     queue_file = root / f'{platform}-{args.city}-队列.md'
@@ -93,7 +102,7 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
     stop_reason = ''
     failures = 0
     key = resume = profile = ''
-    cache_file = root / f'jev-{platform}-cache.json'
+    cache_file = root / f'{"llm" if args.matcher == "llm" else "jev"}-{platform}-cache.json'
     current = {'platform': platform}
 
     def persist(bucket, entry):
@@ -131,10 +140,16 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                               for r in approved_review_rows(root, platform, args.city)]
             if not approved_cards:
                 raise StopRun('没有本城市可投递的人工批准岗位，未连接浏览器')
-        if not args.approved and args.matcher == 'jev':
-            key = jev.load_jev_key()
-            if not key:
-                raise StopRun('缺少 JEV_API_KEY，不降级、不连接浏览器')
+        if not args.approved and args.matcher in ('jev', 'llm'):
+            if args.matcher == 'llm':
+                key = llm_match.load_llm_key(jev.LLM_SETTINGS)
+                if not key or not llm_match.settings_ready(jev.LLM_SETTINGS):
+                    # 与缺 Jev 密钥一致按 StopRun 结束；退出码 2 在 daily 中表示冷却，不能复用
+                    raise StopRun('LLM 缺少 base_url/model 或密钥；请运行 python3 config_tool.py check；不降级、不连接浏览器')
+            else:
+                key = jev.load_jev_key()
+                if not key:
+                    raise StopRun('缺少 JEV_API_KEY，请运行 python3 config_tool.py check；不降级、不连接浏览器')
             path = Path(cfg.get('resume_path', '')).expanduser()
             if not path.is_absolute():
                 path = root / path
@@ -201,12 +216,12 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                 cache_id = scope + ':' + card['job_id']
                 try:
                     # 缓存 apply 真投前仍会重开详情，应届生申请状态闸门在详情分支执行。
-                    cached = None if args.approved or args.refresh or args.matcher != 'jev' else jev.latest_match(cache_id, cache_file)
+                    cached = None if args.approved or args.refresh or args.matcher == 'keyword' else jev.latest_match(cache_id, cache_file)
                     if cached:
                         result = cached
                         entry['cache_hit'] = True
                     else:
-                        if not args.approved and args.matcher == 'jev':
+                        if not args.approved and args.matcher in ('jev', 'llm'):
                             excluded = next((kw for kw in cfg['exclude_keywords'] if kw and kw.lower() in card['title'].lower()), '')
                             if excluded:
                                 decision(entry, 'skip', f'标题排除词：{excluded}')
@@ -268,14 +283,14 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                             jd = jev.clean_jd(card.get('tags', '') + '\n' + detail['jd'])
                             score, why = score_jd(card['title'], jd, cfg)
                             entry['keyword_score'] = score
-                            if args.matcher == 'jev':
+                            if args.matcher in ('jev', 'llm'):
                                 state = jev.build_state(card['title'], entry['company'], jd, resume, profile)
                                 result = jev.match_job(cache_id, jd, state, key, cache_file, refresh=args.refresh)
                             else:
                                 result = {'decision': {'decision': 'apply' if score >= args.min_score else 'skip', 'reason': why}}
                     failures = 0
                     if not args.approved:
-                        entry['jev'] = result if args.matcher == 'jev' else {}
+                        entry['jev'] = result if args.matcher in ('jev', 'llm') else {}
                     d = effective_decision(result, args.match_policy)
                     decision(entry, d['decision'], d['reason'])
                     if args.dry_run or d['decision'] != 'apply' or counts['applied'] >= args.count:
@@ -325,9 +340,9 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                             rest(SUCCESS_REST, check)
                 except jev.JevError:
                     failures += 1
-                    decision(entry, 'review', 'Jev 调用或响应解析失败')
+                    decision(entry, 'review', ('LLM' if args.matcher == 'llm' else 'Jev') + ' 调用或响应解析失败')
                     if failures >= jev.MAX_CONSECUTIVE_FAILURES:
-                        raise StopRun('Jev 连续失败 3 次')
+                        raise StopRun(('LLM' if args.matcher == 'llm' else 'Jev') + ' 连续失败 3 次')
                 finally:
                     adapter.close_detail()
             if args.approved or args.fill_queue and counts['applied'] >= args.count:
@@ -360,9 +375,10 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
 
 def main(platform, city_codes, argv=None):
     cfg = load_config()
-    jev.configure(cfg)
     args = parse_args(city_codes, argv, platform=platform,
-                      default_count=cfg['default_count'], default_min_score=cfg['min_score'])
+                      default_count=cfg['default_count'], default_min_score=cfg['min_score'],
+                      default_city=cfg.get('city', '深圳'), default_matcher=cfg.get('matcher', 'jev'))
+    jev.configure({**cfg, 'matcher': args.matcher})
     # 延迟连接：冷却、配置和校准门禁检查在 execute 里先于 search 完成。
     class LazyAdapter(PlatformAdapter):
         def open_approved_detail(self, card):

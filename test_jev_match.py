@@ -394,3 +394,32 @@ def test_configure_profile_text_defaults_and_override():
         assert '纯技术研发' in jm.TITLE_QUESTIONS['title_fit']['criteria']['1']
     finally:
         jm.configure({})
+
+
+def test_llm_dispatch_accepts_shared_decisions(monkeypatch):
+    import llm_match
+    raw = answers()
+    raw["fit"]["probabilities"] = {"0": 0, "1": 0, "2": 0, "3": 1}
+    raw["action"]["probabilities"] = {"0": 1, "1": 0, "2": 0}
+    calls = []
+
+    def urlopen(req, timeout):
+        payload = json.loads(req.data)
+        calls.append(payload)
+        questions = json.loads(payload["messages"][1]["content"])["questions"]
+        result = raw if "edu" in questions else {"title_fit": {"choice": "0", "probabilities": {"0": 1, "1": 0}}}
+        return io.BytesIO(json.dumps({"choices": [{"message": {"content": json.dumps(result)}}]}).encode())
+
+    monkeypatch.setattr(llm_match.request, "urlopen", urlopen)
+    try:
+        jev.configure({"matcher": "llm", "llm": {"base_url": "https://example.com/v1", "model": "cheap"}})
+        assert jev.decide(jev.call_jev("state", "key", 9))["decision"] == "apply"
+        assert jev.decide_title(jev.call_title_jev("state", "key", 9)) == (False, "")
+        assert len(calls) == 2
+        assert jev.backend_cache_id("job") != "job"
+        first = jev.backend_cache_id("job")
+        jev.configure({"matcher": "llm", "llm": {"base_url": "https://example.com/v1", "model": "other"}})
+        assert jev.backend_cache_id("job") != first
+    finally:
+        jev.configure({})
+    assert jev.BACKEND == "jev" and jev.backend_cache_id("job") == "job"

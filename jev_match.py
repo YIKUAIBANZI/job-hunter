@@ -66,11 +66,17 @@ def build_questions(text=None):
 
 
 TITLE_QUESTIONS, HARD_QUESTIONS, QUESTIONS = build_questions()
+BACKEND = "jev"
+LLM_SETTINGS = {"base_url": "", "model": "", "api_key_env": "JOBHUNTER_LLM_KEY"}
 
 
 def configure(cfg) -> None:
     """按 config.json 的 jev_* 字段重建提问；入口脚本加载配置后调用一次。"""
-    global TITLE_QUESTIONS, HARD_QUESTIONS, QUESTIONS
+    global TITLE_QUESTIONS, HARD_QUESTIONS, QUESTIONS, BACKEND, LLM_SETTINGS
+    BACKEND = cfg.get("matcher", "jev")
+    settings = cfg.get("llm")
+    LLM_SETTINGS = {"base_url": "", "model": "", "api_key_env": "JOBHUNTER_LLM_KEY",
+                    **(settings if isinstance(settings, dict) else {})}
     text = {k: cfg[k] for k in DEFAULT_PROFILE_TEXT if isinstance(cfg.get(k), str) and cfg[k].strip()}
     TITLE_QUESTIONS, HARD_QUESTIONS, QUESTIONS = build_questions(text)
 
@@ -202,6 +208,9 @@ def decide_title(answer: dict) -> tuple[bool, str]:
 
 
 def _request_jev(state: str, key: str, questions: dict, timeout) -> dict:
+    if BACKEND == "llm":
+        from llm_match import request_answers
+        return request_answers(state, questions, LLM_SETTINGS, key, timeout)
     payload = {"model": JEV_MODEL, "state": state, "questions": questions}
     req = request.Request(
         JEV_URL, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -237,6 +246,14 @@ def call_title_jev(state: str, key: str, timeout=30) -> dict:
 def cache_key(job_id: str, jd_text: str) -> str:
     digest = hashlib.sha1(jd_text.encode("utf-8")).hexdigest()[:12]
     return f"boss:{job_id}:{digest}"
+
+
+def backend_cache_id(job_id: str) -> str:
+    """Boss 仅给 LLM 增加接口/模型摘要；Jev 的职位键逐字不变。"""
+    if BACKEND != "llm":
+        return job_id
+    payload = json.dumps(["llm", LLM_SETTINGS["base_url"], LLM_SETTINGS["model"]], ensure_ascii=False)
+    return "llm:" + hashlib.sha256(payload.encode()).hexdigest()[:16] + ":" + job_id
 
 
 def _load_cache(cache_file: Path) -> dict:

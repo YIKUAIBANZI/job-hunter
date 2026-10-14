@@ -1,74 +1,76 @@
 ---
 name: job-hunter
-description: 求职筛选与投递助手，支持 BOSS、猎聘、应届生求职网、51job、鱼泡。先读取简历与偏好，只读核对岗位，再在授权范围内慢速投递并核验。
+description: 为用户引导首次求职配置、用自然语言修改偏好，并在 BOSS、猎聘、应届生、51job、鱼泡筛选岗位与受控投递。支持 Jev、OpenAI 兼容 LLM 和本地关键词匹配。
 origin: local
 ---
 
 # Job Hunter
 
-先读项目 `mmr.md` 与 [README.md](README.md)，按已有上下文延续任务。开发、离线测试和只读页面检查不需要重新收集已知偏好。
+使用者是用户和用户自己的 agent。先读 `mmr.md` 恢复当前状态，命令与筛选细节查 [README.md](README.md)。已有简历、偏好和授权沿用，不重复询问。
 
-## 配置与权限
+## 首次使用
 
-- `config.json` 配置文本简历、求职偏好、脱敏词、方向和公司黑名单；缺失时仅询问必要的信息。
-- Jev 模式会向 `api.typesafe.ai` 发送脱敏简历、偏好和 JD；密钥存在不代表同意数据外发。遵守当前聊天授权和自动审批结果。
-- 在 Chrome 9222 对应用户目录手动登录；不读取或导出认证凭证，不自动过验证码。
-- **首次平台真实投递必须问用户**。先完成可独立完成的实现、离线测试、只读实测和候选队列，让授权针对具体平台和岗位。用户已有明确授权则不重复确认。
-- 不重放内部 API，不增加自定义聊天或替用户承诺资历。
+`config.json` 不存在或 `python3 config_tool.py check` 不通过时执行。一次性问清以下清单中尚未知的信息；已有配置用 `set` 修复，不重新初始化。
+
+1. 简历文件路径（UTF-8 txt/md，PDF 请用户另存文本）和需要脱敏的姓名等词，映射 `resume_path`、`resume_redact`。
+2. 目标城市、身份（届别/在校或社招）、求职方向与岗位关键词，映射 `city`、`target_roles`、`job_profile`。偏好同时写明每周到岗天数、工作城市、实习时长等已知条件，不虚构经历。
+3. 根据方向生成四段提问文本，给用户看一眼后写入：`jev_direction`（目标方向）、`jev_title_unrelated`（明显无关岗位）、`jev_stage_question`（符合身份的完整提问）、`jev_fit_unrelated`（不相关的最低档描述）。Jev 与 LLM 共用，保留 `jev_` 前缀。运营方向应移除默认“纯运营不相关”，社招身份不能保留默认在校/2027届实习问题。
+4. 匹配方式：有 Jev 密钥可用 `jev`；否则建议 `llm`，推荐便宜的 OpenAI 兼容模型，例如 DeepSeek、通义千问 flash/turbo 档或 GPT mini 档。让用户填写服务商实际 API 根地址和模型 ID；离线时不声称型号、价格或可用性已验证。密钥由用户放入环境变量或 `~/.config/jobhunter/llm.env`，只设置 `llm.api_key_env` 变量名，绝不写密钥到 JSON 或聊天输出。都不想用模型则选 `keyword`，说明只做关键词打分、精度低，建议投递前人工复核。
+5. 打招呼语、公司黑名单和每日配额（`daily.json`）可后续补充。`default_count` 是单入口默认份数，不是每日配额。
+6. 用以下非交互命令写入，再跑 `check`。提醒用户在端口 9222 的 Chrome 中登录各平台，51job 需完善在线简历。`--no-chrome` 只跳过 TCP 探测，不能证明登录就绪。
+
+```bash
+python3 config_tool.py init --resume ./resume.md --city 深圳 --matcher keyword
+python3 config_tool.py fields
+python3 config_tool.py set resume_redact "张三"
+python3 config_tool.py set target_roles "运营，电商运营"
+python3 config_tool.py set job_profile "用户确认的身份、求职方向、城市与到岗条件"
+# 将用户看过的四段 jev_* 文本分别 set 写入
+python3 config_tool.py check
+```
+
+`init` 不覆盖现有配置。每次 `set/unset` 原子写入后自动 check，检查失败退出码为 1，修改仍已保存；汇总尚缺项目并修复，不能把它误认为写入失败。提示默认画像是提醒，不单独视为阻塞；方向不同时必须同步更换文本。
+
+## 修改参数
+
+用户说“方向改成运营”“换便宜模型”等自然语言时，agent 查 `python3 config_tool.py fields` 映射字段，直接 `set`，不让用户编辑 JSON。列表可用中文或英文逗号；数值与后端枚举由工具校验。改方向/身份时同步更新 `target_roles/job_profile` 和四段 `jev_*` 文本；换服务商/模型时更新 `matcher/llm.base_url/llm.model/llm.api_key_env` 中对应字段。可选字段用 `unset` 回到默认值，不能删除简历、岗位列表和画像等必填项。
+
+改完把 check 结果及待处理项告诉用户。各投递入口的城市和匹配器默认读配置，显式 CLI 参数优先。BOSS 改简历、偏好或提问后使用 `--refresh`，避免复用旧结论；其他平台会自动隔离材料摘要，LLM 还隔离接口与模型。
+
+## 权限与安全
+
+- Jev/LLM 会外发脱敏简历、偏好、岗位公司和 JD，dry-run 也会请求并计费；先确认用户对该服务商的数据外发授权。密钥存在不代表授权。keyword 不调用模型。
+- 在 Chrome 9222 对应用户目录手动登录，不读取/导出认证凭证，不绕过验证码，不重放内部 API。
+- 真投前征得对应平台、岗位或配额的同意；已有明确授权不重复确认。首单应针对已核对的具体候选，先完成 dry-run，再 `--calibrate --count 1 --job-id <已确认ID>`（BOSS 按其已有入口）。未校准平台不批量真投。
+- 默认 `review-gate`：模型建议复核就进入人工队列，不能因分数高放行；`boss-b` 仅在用户明确选旧策略时使用。
+- 提交必须核验当前 ID、标题、公司与按钮，点击前落盘 pending，只原生点击一次。成功要有当前岗位的页面变化或已校准且关联当前职位的接口证据，分别报告，不能把未知 code=0 当成成功。
+- pending 不算成功、不重投，出现即停。风控、断连、超时和不明结果不重试，保留记录。用户说停就立即停止，不为填配额继续。
 
 ## 平台流程
 
-1. 优先 `--dry-run --matcher keyword` 验证稳定 ID、卡片/详情标题、公司及 JD，无第三方模型调用。
-2. 已授权 Jev 后切换 `--matcher jev`，审阅推荐/复核/跳过。新平台默认 `review-gate`，Jev 建议复核不投；`boss-b` 仅在明确选择交接阈值时使用。
-3. 登录、数据边界和候选均已确认后，真实首单使用 `--calibrate --count 1 --job-id <已确认ID>`。未加入 `CALIBRATED` 的平台禁止未经校准的批量真投。
-4. 检查网络和页面证据：未知接口 code=0 无效，必须绑定当前岗位；页面证据必须是同一岗位点击后的明确成功变化。
-5. `pending` 不算成功，不重复提交；出现一条就停止。本次失败、风控或断连也必须完整报告，不用输出过滤隐藏停止原因。
-
-命令和已支持筛选见 README。不要套用 BOSS 的经验/学历代码；未知筛选不得静默忽略。
-
-| 平台 | 入口 | 首单状态 |
+| 平台 | 入口 | 状态 |
 |---|---|---|
 | BOSS | `boss_apply.py` | 已实测 |
 | 猎聘 | `liepin_apply.py` | 已校准 |
-| 应届生求职网 `yingjiesheng` | `yingjiesheng_apply.py` | 未校准，需首单实测 |
-| 51job | `51job_apply.py` | 未校准 |
-| 鱼泡 | `yupao_apply.py` | 未校准 |
+| 应届生求职网 | `yingjiesheng_apply.py` | 已校准 |
+| 51job | `51job_apply.py` | 已校准 |
+| 鱼泡 | `yupao_apply.py` | 待校准 |
 
-应届生本阶段仅离线实现。只监听页面搜索/详情请求，详情新建标签直接导航并清理；申请仍按 ID + 标题核验，仅原生点击可见“立即申请”。`--job-type/--experience/--degree` 非空直接报错，用关键词 + Jev 硬条件。卡片已申请/转载/过期在开详情前跳过，详情志愿状态与简历完整度先于 Jev 和缓存判断；需换志愿或补信息进复核，不调 Jev。可见 `.delivery-tip` 按文字复核，点击后任何 `.el-dialog` 保留 pending 并停止，绝不操作弹窗按钮。
+状态与代码门禁有差异时，以具体证据和 `platform_adapters.CALIBRATED` 核对，不靠改文档解除门禁。推荐/复核/跳过只是匹配结论，不等于实投。
 
-应届生支持 `--approved`，同样新建详情标签、读状态并核验身份，不调 Jev；未校准门禁不变，真实首单必须 `--calibrate --job-id <已确认ID> --count 1`。`VERIFIED_ENDPOINTS` 的 `/open/yjs/apply` 条件来自前端 JS：外层 status 与 resultbody.items[0].status 均为 1；证据仅新增 outer_status/nested_status 短码。维护者完成实测后才能加入 `CALIBRATED`。保持详情间隔 15–30 秒、每 5 份休息 90–180 秒、默认详情上限 20；日志/冷却/缓存前缀为 `yingjiesheng`、`yingjiesheng`、`jev-yingjiesheng`，现有忽略规则已覆盖。
+先 `--dry-run --matcher keyword` 核对页面、ID 与 JD；获模型外发授权后再用配置后端评估。未知筛选直接报错，不套用其他平台代码。
 
-人工复核使用 `python3 review_list.py [--city 深圳]` 生成 `复核清单.md`。用户看过岗位并将批准列改为 `[x]` 后，BOSS/猎聘/鱼泡可用 `--approved --city 深圳 --count 1`；不需要 `--job`，不搜索、不读取 Jev key/简历、不调 Jev。只采用日志中同平台、同城市且已勾选的 ID 与详情 URL，清单编辑不替代岗位身份核验；重新生成保留仍在清单的勾选，已 applied/pending 自动移除。51job 行为 `—`，禁止批准投递，需人工页面处理。
+- 应届生不支持工作类型/经验/学历筛选，用关键词与模型硬条件。已申请、转载、过期跳过；换志愿、补信息、简历不完整、`.delivery-tip` 进入复核。详情状态先于模型/缓存；点击后任何 `.el-dialog` 保留 pending，不操作弹窗。
+- 51job JD 只取页面自身搜索请求并按 jobId+标题关联，不重放接口、不开详情页；缺项或空 JD 先复核，校招交应届生，外跳/过期跳过。`--approved` 禁止，用户在页面手动处理。
+- 猎聘学历单值，原生选择后核验；鱼泡工作类型/经验/学历参数须为空。鱼泡未知业务端点不能确认网络成功。
+- 保持现有慢节奏与详情上限，不自动加 `--fast/--ignore-cooldown`。详情标签只清理工具自建标签，不并发运行投递脚本。
 
-批准模式仍需登录、冷却、风控、黑名单、去重、详情 ID+标题一致、按钮核对、点击前 pending、监听/页面证据、原有慢节奏；不允许 `--fill-queue`，BOSS 也不允许 `--fast/--ignore-cooldown`。BOSS 详情 URL/标题或 `a.btn-startchat` 接口前缀不符即复核，“继续沟通”跳过；猎聘/鱼泡复用详情核验与 submit。未校准平台仍需用户具体授权后 `--calibrate --count 1 --job-id <已勾选ID>`，不能因打勾放宽门禁。成功原因前缀为 `[人工批准]`。批准路径当前仅离线验证，真实页面仍需维护者确认。
+## 复核、日跑与交付
 
-- 猎聘支持 `--degree 本科` 等单个学历值（博士、硕士、本科、大专、中专/中技、高中、初中及以下），原生打开下拉，只点击可见选项并校验选中状态；逗号多值报错。
-- 鱼泡无实习/学历/经验筛选，学历和经验下拉不能可靠筛选列表。三个筛选参数默认空值；非空即报错。使用关键词（如“AI产品实习”）并依赖 Jev 硬条件。页面为 `yupao.com`，业务证据还需收取 `yupaowang.com`；只有已校准精确端点能确认网络成功。
-- 51job JD 取自搜索页自身请求的 `we.51job.com/api/job/search-pc`，导航前监听、原生筛选后取最后一包 `resultbody.job.items`，不重放接口、不开详情页。按卡片 sensorsdata 的 jobId + jobTitle 关联 JD 和核验列表“投递”按钮；缺项、标题不一致或 JD 为空先复核，不调 Jev。已申请跳过；校招岗位（`isFromXyx=True`）交给 `yingjiesheng_apply.py`，转载/外跳/过期跳过。本阶段仅离线验证，首单门禁与 `--approved` 禁令不变。
-- 51job 面向 27 届秋招校招用 `--job-type 全职 --experience 在校生/应届生`，可加 `--degree 本科`；实习岗位用 `--job-type 实习`。经验别名“在校生”“应届生”“在校生,应届生”均映射为“在校生/应届生”。
-- 51job 列表 JD 评估间隔 6–12 秒，每 8 份额外休息 60–120 秒，`--max-views` 默认 30（views 为评估间隔，不开详情），显式值优先（1–60）。猎聘/鱼泡保持 6–15 秒、每 10 份休息 45–90 秒、默认 60 份。慢节奏不保证免受风控，搜索页风控检测照旧。
+`python3 review_list.py [--city 深圳]` 生成 `复核清单.md`。用户看过并勾选 `[x]` 后，BOSS/猎聘/应届生/鱼泡可用 `--approved --city 深圳 --count 1`；不搜索、不读简历/模型密钥、不调模型，仍核验详情身份、公司、冷却、去重与按钮，未校准平台仍须首单门禁。禁止 `--fill-queue`，BOSS 也禁止 `--fast/--ignore-cooldown`。
 
-## 日志与交付
+日跑 `python3 daily.py [--plan daily.json]` 默认 dry-run；只有对应平台与配额已授权才 `--live`。计划关键词必须精确属于 `target_roles`，不扩词；五平台配额与城市由 daily.json 决定，不能误用 default_count。顺序运行、不轮询；读取退出码、`日报.md` 与 `runs/<日期>/` 日志，0 不代表配额全部完成。pending 停该平台，超时/风控不重试。
 
-批量日跑使用 `python3 daily.py [--plan daily.json]`，默认给投递入口加 `--dry-run`；只有已获得对应平台和配额授权时才加 `--live`。一次阻塞调用结束后读取退出码及 `日报.md`，无需轮询。先复制 `daily.example.json` 为本地 `daily.json`，确保所有关键词精确属于 `config.target_roles`，不自行扩词；缺字段、越界词和危险参数启动即拒绝。当前示例词为 `AI产品`、`产品实习`，不要把包含匹配当成白名单授权。
+招呼语补发 `boss_greet.py` 默认预览，单独获发送授权才 `--send`。`inbox_report.py` 只读回复，不点击会话/标已读、不发消息；`apply_tracker.py` 只读本地官网缓存，网申由用户手动完成。官网入口发现仍是独立 Jev+搜索流程，不受 JD matcher 配置影响。
 
-日跑只用 subprocess 顺序调用 BOSS、猎聘、应届生、51job、鱼泡入口；旧计划需补齐 `yingjiesheng`，示例 quota=0、keywords=["产品经理"]，零配额也须校验 config.target_roles 白名单。零配额跳过，真投按新增唯一 applied ID 扣额度，试跑按评估数扣额度。每轮新增 pending 停止该平台剩余关键词。冷却、风控、未校准或异常停止该平台但继续下一平台；真投识别首单门禁文案，不传 `--calibrate`。绝不传 `--fast/--ignore-cooldown/--match-policy boss-b` 或允许计划覆盖城市、关键词、配额。平台间休息 60–180 秒，`--no-rest` 仅供测试/调试；单入口超时 90 分钟，不重试。
-
-完成平台后，计划 `greet=true` 且真投才运行 `boss_greet.py --send --count 10`；随后按计划生成复核清单和回复日报。日报列本次新增、需要人工核验的 pending、实际复核清单新增 ID、HR 已回复数及后处理错误；旧回复日报未更新时明确标记。退出码 1 表示平台风控，正常结束其余状态为 0，启动校验失败为 2；0 不代表全部配额完成。查看日报中的状态和 `runs/<日期>/` 日志，同日重跑会覆盖同名文件，需留证先另存。`daily.json`、`runs/`、`日报.md` 仅本地保留；当前日跑仅离线 mock 验证。
-
-回复跟进使用 `python3 inbox_report.py [--city 深圳] [--no-liepin]`，覆盖本地 `回复日报.md`。只在自建标签读取 BOSS 会话列表与猎聘未读数，关闭自建标签；不点击会话（会标为已读）、不输入、不发送。BOSS 等待 5–7 秒，最多滚动列表父容器 5 次，每次间隔 1.5–3 秒；只汇总加载到的会话。按所选城市 applied 日志的公司关联，截断品牌按前缀匹配，同公司多个岗位全部保留，不能确认具体回复岗位；未匹配标“非本工具投递”。猎聘跳过时标未读取。读取前后检查风控，命中只写 `boss-cooldown.json`、退出码 1、保留旧日报与日志；已有冷却不连接。当前仅离线验证，实机需确认列表 DOM、懒加载、无会话点击和未读状态保持。
-
-官网网申进度使用 `python3 apply_tracker.py [--add 公司 URL]`，只读本地官网缓存并生成 `网申进度.md`，绝不联网、打开浏览器或自动填写网申表单。用户手填截止日期、状态与备注，重建按 URL（去查询、片段、末尾斜杠）保留；状态异常计“其他”，缓存消失但已改状态或有备注的行标“(缓存已过期)”，手动入口持续保留。每家公司最多两个缓存入口，已核验优先，再按官方概率排序。日跑计划可选 `tracker=true`（缺省 false，示例 true），在 review_list/inbox 之后运行，并在日报列入口数与 7 天内截止数；失败时标明旧统计或不可读。用户需自行核对截止日期并手动完成网申。
-
-每次查看 `<平台>-<城市>-队列.md` 与 `*-log.json`，分别报告：
-
-- 推荐/复核/跳过：匹配判断，不代表投递。
-- applied：接口或当前岗位按钮确认；注明只有一路还是双路证据。
-- pending：预记/已尝试待核验，计入去重。
-- failed / status=blocked：明确失败或风控，冷却 2 小时。
-
-只写当前 run 的事实，不能把网络模拟单测写成实投验证。新平台代码变更和校准证据更新 `mmr.md` 与 evidence 记录；不提交个人配置、简历、缓存、日志或认证目录。
-
-## BOSS
-
-BOSS 默认 review-gate（Jev 复核不自动沟通）。个性化招呼语是可选项：`python3 boss_greet.py --city 深圳` 预览，用户同意后加 `--send`。执行方只用 `config.target_roles` 里的搜索词，不自行扩词。BOSS 的真实状态以 `mmr.md` 最新记录为准。
+每轮交付本次新增 applied、pending、复核/跳过、停止原因与证据边界，查看 `<平台>-<城市>-队列.md` 和日志。applied 不证明简历附件已送达、HR 回复或面试；mock 测试不能写成实投。个人配置、简历、模型缓存、日志、密钥和认证目录只留本地，禁止提交；LLM 缓存文件尚未列入当前 .gitignore，尤其注意 `llm-cache.json` 与 `llm-<平台>-cache.json`。

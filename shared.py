@@ -3,15 +3,21 @@
 import argparse
 import json
 import re
+from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from DrissionPage import ChromiumOptions, ChromiumPage
+from jev_match import DEFAULT_PROFILE_TEXT
 
 BOSS_JOB_ID_PATTERN = r"(?:^|/)job_detail/([A-Za-z0-9_-]+)\.html$"
 
 DEFAULT_CONFIG = {
+    "city": "深圳",
+    "matcher": "jev",
+    "llm": {"base_url": "", "model": "", "api_key_env": "JOBHUNTER_LLM_KEY"},
+    **DEFAULT_PROFILE_TEXT,
     "resume_path": "",
     "job_profile": "",
     "resume_redact": [],
@@ -26,14 +32,22 @@ DEFAULT_CONFIG = {
 }
 
 
+def effective_config(cfg: dict) -> dict:
+    """深拷贝默认值，LLM 子字段也补齐；不修改传入配置。"""
+    merged = {**deepcopy(DEFAULT_CONFIG), **deepcopy(cfg)}
+    if isinstance(merged["llm"], dict):
+        merged["llm"] = {**DEFAULT_CONFIG["llm"], **merged["llm"]}
+    return merged
+
+
 def load_config(skill_dir: Path | None = None) -> dict:
     """读取用户配置。优先 config.json，缺省字段用 DEFAULT_CONFIG 补齐。"""
     skill_dir = skill_dir or Path(__file__).parent
     cfg_file = skill_dir / "config.json"
-    cfg = dict(DEFAULT_CONFIG)
+    cfg = {}
     if cfg_file.exists():
         cfg.update(json.loads(cfg_file.read_text(encoding="utf-8")))
-    return cfg
+    return effective_config(cfg)
 
 
 def load_log(log_file: Path) -> dict:
@@ -150,6 +164,7 @@ def parse_common_args(
     default_city: str = "全国",
     default_count: int = 20,
     default_min_score: int = 60,
+    default_matcher: str = "jev",
     count_help: str = "投递数量",
     include_matcher: bool = False,
     argv: list[str] | None = None,
@@ -179,8 +194,8 @@ def parse_common_args(
         p.add_argument("--refresh", action="store_true", help="Boss 绕过匹配缓存，重新打开详情并评分")
         p.add_argument("--fill-queue", action="store_true", help="Boss Jev 投满后继续评完当前批次，补充队列")
         p.add_argument("--ignore-cooldown", action="store_true", help="Boss 跳过启动时的风控冷却检查")
-        p.add_argument("--matcher", choices=("jev", "keyword"), default="jev",
-                       help="Boss 匹配器：jev（默认）或 keyword（使用 --min-score）")
+        p.add_argument("--matcher", choices=("jev", "llm", "keyword"), default=default_matcher,
+                       help="匹配器：jev / llm / keyword（使用 --min-score）；默认读配置")
         p.add_argument("--match-policy", choices=("review-gate", "boss-b"), default="review-gate",
                        help="Boss Jev 放行策略：review-gate（默认，Jev 建议复核的一律进队列）或 boss-b（旧方案 B）")
         p.add_argument("--job-type", default="实习", help="Boss 求职类型：不限/全职/实习/兼职（默认 实习）")
@@ -188,6 +203,8 @@ def parse_common_args(
                        help="Boss 工作经验，逗号分隔，如 在校生,应届生（空=不限）")
         p.add_argument("--degree", default="", help="Boss 学历要求，逗号分隔，如 本科,大专（空=不限）")
     args = p.parse_args(argv)
+    if include_matcher and args.matcher not in ("jev", "llm", "keyword"):
+        p.error('配置中的 matcher 无效，请运行 python3 config_tool.py check')
     if not args.job and not getattr(args, 'approved', False):
         p.error('必须提供 --job，或使用 --approved')
     if getattr(args, 'approved', False):

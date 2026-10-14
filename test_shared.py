@@ -21,6 +21,15 @@ from shared import (
 CITY_CODES = {"全国": "000", "深圳": "050090"}
 
 
+def test_matcher_choices_and_injected_defaults():
+    for matcher in ("jev", "llm", "keyword"):
+        args = parse_common_args(CITY_CODES, include_matcher=True, default_city="深圳",
+                                 default_matcher=matcher, argv=["--job", "运营"])
+        assert args.matcher == matcher and args.city == "深圳"
+        args = parse_common_args(CITY_CODES, include_matcher=True, argv=["--job", "运营", "--matcher", matcher])
+        assert args.matcher == matcher
+
+
 # ---------- Boss 职位 ID / 沟通响应 ----------
 
 
