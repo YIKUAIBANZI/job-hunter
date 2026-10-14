@@ -367,3 +367,11 @@ def test_hard_uses_weakest_dimension():
 def test_clean_jd_strips_boss_noise():
     raw = "举报\n微信扫码分享\n职位描述\n关于泡泡星boss球 来自BOSS直聘洗车kanzhun\n任职要求：本科\n 彭女士 刚刚活跃\n 广州影子科技\n工作地址\n深圳"
     assert jev.clean_jd(raw) == "关于泡泡星球 洗车\n任职要求：本科"
+
+
+def test_title_protected_product_titles():
+    from jev_match import title_protected
+    assert title_protected("AI产品实习生")
+    assert title_protected("产品助理（27届实习生）")
+    assert not title_protected("前端开发工程师")
+    assert not title_protected("")

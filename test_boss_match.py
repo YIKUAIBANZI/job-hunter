@@ -81,7 +81,9 @@ def card(job_id, **kwargs):
 
 @pytest.fixture
 def harness(monkeypatch, tmp_path):
-    def setup(cards, responses=None, chat_statuses=None, title_responses=None, **overrides):
+    def setup(cards, responses=None, chat_statuses=None, title_responses=None, protect=False, **overrides):
+        if not protect:  # 旧用例默认标题含“产品”，关掉保护以覆盖粗筛路径
+            monkeypatch.setattr(boss, "title_protected", lambda title: False)
         cfg = {**DEFAULT_CONFIG, "resume_path": "resume.txt", "job_profile": "张三，2027届，非985/211，深圳",
                "resume_redact": ["张三"], "target_roles": ["产品经理"], "exclude_keywords": ["资深"], **overrides}
         (tmp_path / "resume.txt").write_text("张三 13812345678 test@example.com\nAgent 产品项目")
@@ -456,3 +458,9 @@ def test_expired_or_ignored_cooldown_allows_browser(harness, tmp_path, ignore):
     }))
     h.run("--dry-run", *(["--ignore-cooldown"] if ignore else []))
     assert h.page.opened == ["a"]
+
+
+def test_product_title_bypasses_title_prefilter(harness):
+    h = harness([card("a", tags=["数据标注/AI训练师"])], title_responses=[{"choice": "1", "probabilities": {"1": 0.9, "0": 0.1}}], protect=True)
+    h.run("--dry-run")
+    assert h.title_calls == [] and h.page.opened == ["a"] and len(h.calls) == 1

@@ -22,6 +22,7 @@ from jev_match import (
     load_jev_key,
     match_job,
     match_title,
+    title_protected,
     redact_resume,
     render_queue_md,
 )
@@ -468,9 +469,11 @@ def main():
                             continue
                         title_state = (f"【岗位卡片】{title}｜{company}｜{salary}｜标签: {card.get('tags', [])}\n"
                                        f"【求职偏好】{profile}")
+                        title_skip = False
                         try:
-                            title_skip, title_reason = match_title(
-                                job_id, title_state, jev_key, cache_file, refresh=args.refresh)
+                            if not title_protected(title):
+                                title_skip, title_reason = match_title(
+                                    job_id, title_state, jev_key, cache_file, refresh=args.refresh)
                         except JevError:
                             title_skip = False
                             print(f"  标题粗筛失败，继续读取 JD：{company} | {title}")

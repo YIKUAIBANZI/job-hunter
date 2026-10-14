@@ -156,6 +156,15 @@ def decide(answers: dict) -> dict:
             "fit_ev": fit_ev, "action": action, "action_p": action_p}
 
 
+# 平台分类标签常被招聘方乱选（如“AI产品实习生”挂在“数据标注”下），
+# 标题含这些词时不做标题粗筛，直接读 JD 判断。
+TITLE_PROTECT_WORDS = ("产品",)
+
+
+def title_protected(title: str) -> bool:
+    return any(word in (title or "") for word in TITLE_PROTECT_WORDS)
+
+
 def decide_title(answer: dict) -> tuple[bool, str]:
     """只有明确选无关且概率达到阈值才拦截；格式错误交由调用方放行。"""
     try:

@@ -173,7 +173,8 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                                 decision(entry, 'skip', f'标题排除词：{excluded}')
                                 continue
                             title_state = jev.build_state(card['title'], entry['company'], card.get('tags', ''), '', profile)
-                            reject, why = jev.match_title(cache_id, title_state, key, cache_file, refresh=args.refresh)
+                            reject, why = (False, '') if jev.title_protected(card['title']) else \
+                                jev.match_title(cache_id, title_state, key, cache_file, refresh=args.refresh)
                             if reject:
                                 failures = 0
                                 decision(entry, 'skip', why)
