@@ -56,7 +56,7 @@ def page_block_reason(page):
         for (const e of document.querySelectorAll('[role="dialog"],.ant-modal,.el-message,.ant-message,.dialog,.modal')) {
             // 带上弹层原文与 class，便于区分真实验证码和普通弹窗误判
             if(visible(e)&&/上限|频繁|验证|异常|操作过快|访问受限/.test(e.innerText||''))
-                return '页面弹层提示风控：' + String(e.className).slice(0,40) + '｜' + (e.innerText||'').replace(/\s+/g,' ').slice(0,120);
+                return '页面弹层提示风控：' + String(e.className).slice(0,40) + '｜' + (e.innerText||'').replace(/\\s+/g,' ').slice(0,120);
         }
         return '';
     ''') or ''
