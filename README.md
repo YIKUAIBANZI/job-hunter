@@ -36,6 +36,34 @@ python3 -m pip install DrissionPage pytest
 
 复制 `config.example.json` 为 `config.json`，配置 UTF-8 文本简历路径、`job_profile`、`resume_redact`、公司黑名单等。不要将个人配置、简历、日志、浏览器目录或密钥提交到 Git。
 
+## 一键日跑与日报
+
+`daily.py` 只通过子进程调用现有入口，不增加投递流程或依赖。一次调用等到全部平台及后处理结束，覆盖生成 `日报.md`，最后在 stdout 打印一行摘要；上层 agent 读取退出码和日报即可，无需轮询。
+
+```bash
+cp daily.example.json daily.json
+# 先检查计划里的所有 keywords 都精确属于 config.json target_roles
+python3 daily.py                       # 默认试跑，所有投递入口加 --dry-run
+python3 daily.py --plan daily.json     # 也可指定其他计划路径
+python3 daily.py --live                # 仅在已授权的平台与配额范围内真投
+```
+
+计划必须包含 `city`、四个平台的 `quota/keywords/args`，以及 `greet/inbox/review_list` 三个布尔值。关键词按完整字符串校验，不做包含匹配、不自动扩词，零配额平台也校验；越界或缺字段在启动任何子进程前报错。当前示例使用 `AI产品`、`产品实习`；若你使用 `config.example.json` 的白名单，须调整计划。`AI产品经理` 与 `AI产品实习` 不因包含 `AI产品` 而被允许。
+
+按 BOSS → 猎聘 → 51job → 鱼泡顺序运行；`quota=0` 跳过并在日报注明。每次搜索的 `--count` 是平台剩余额度：真投按分类内新增的唯一 applied ID 扣减，试跑按入口输出的评估数量扣减（无统计时按传入额度扣减）。额度用完停止；新增 pending 也停止该平台剩余关键词，留待人工核验。试跑仍会读取真实浏览器，默认 Jev 仍会外发脱敏材料并计费；`args` 可用 `--matcher keyword` 做本地匹配。
+
+`args` 只接受筛选、匹配和扫描上限参数：`--job-type/--experience/--degree/--matcher/--min-score/--max-views/--max-pages/--match-policy review-gate/--refresh`（平台是否支持仍由其入口判断）。禁止覆盖关键词、城市、配额、运行模式；`--fast`、`--ignore-cooldown`、`--match-policy boss-b`、`--calibrate` 等在计划校验时直接拒绝。
+
+每个入口最多运行 90 分钟，超时终止且不重试，读取已落盘日志后继续下一平台。stdout/stderr 合流写入 `runs/<日期>/<平台>-<序号>.log`，后处理写入同目录的脚本名日志；同日再次运行会覆盖同名日志及日报，需保留证据时先另存。实际运行的平台之间随机休息 60–180 秒，试跑也休息；`--no-rest` 仅供测试/调试。
+
+退出码 2 或入口明确输出“冷却中”记冷却；退出码 1 或新增 blocked 记风控；其他非零记异常，均停止该平台剩余关键词并继续下一平台。新平台目前有些停止路径返回 0，因此也识别其明确停止文案。真投时输出“尚未首单校准”记“未校准，跳过”（兼容门禁返回非零）；新增 blocked 仍优先记风控。日跑不校准、不重试，也不会仅凭普通异常猜测平台是否已校准。
+
+平台结束后按顺序执行：仅 `greet=true` 且真投时补发 BOSS 招呼语（`--send --count 10`）；`review_list=true` 时生成复核清单；`inbox=true` 时读取回复日报。默认启用后两项，招呼语默认关闭。后处理也有日志和超时；失败时在日报注明，已有回复日报的统计标记为“非本次更新”。
+
+日报包含各平台本次新增已投、待核验、复核、跳过、状态及日志链接，另列新增已投岗位、复核清单新增 ID 数和回复日报首部的 HR 已回复数。所有计数按平台、分类和岗位 ID 去重；历史 applied 不计，pending 转 applied 只算新增已投，已确认成功的预记不算待核验。平台整体退出码：任一平台风控为 1，其余运行状态为 0；计划/配置启动校验错误为 2。退出码 0 可能包含冷却、未校准或异常，须结合日报查看。
+
+`daily.json`、`runs/`、`日报.md` 均已忽略提交。日跑本阶段仅经 mock 子进程与临时日志离线验证，未连接浏览器、未真投。
+
 ## 先只读验证
 
 ```bash
