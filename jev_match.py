@@ -306,7 +306,7 @@ def render_queue_md(rows: list[dict], stats: dict) -> str:
                 ACTION_LABELS.get(result.get("action"), "—"),
                 row.get("reason", ""), row.get("url", "")]
 
-    lines = [f"# Boss {cell(stats.get('city', ''))} 待投队列", "", "## 本次统计", "",
+    lines = [f"# {cell(stats.get('platform', 'Boss'))} {cell(stats.get('city', ''))} 待投队列", "", "## 本次统计", "",
              "｜".join(f"{label}：{stats.get(key, 0)}" for key, label in (
                  ("apply", "推荐"), ("review", "复核"), ("skip", "跳过"),
                  ("applied", "已沟通"), ("pending", "待核验"))), "",
