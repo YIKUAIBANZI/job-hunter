@@ -375,3 +375,22 @@ def test_title_protected_product_titles():
     assert title_protected("产品助理（27届实习生）")
     assert not title_protected("前端开发工程师")
     assert not title_protected("")
+
+
+def test_configure_profile_text_defaults_and_override():
+    import jev_match as jm
+    default = jm.build_questions()
+    try:
+        jm.configure({})
+        assert (jm.TITLE_QUESTIONS, jm.HARD_QUESTIONS, jm.QUESTIONS) == default
+        assert '2027届' in jm.QUESTIONS['stage']['instructions']
+        jm.configure({'jev_direction': '新媒体/电商运营岗位', 'jev_stage_question': '岗位是否接受2025届毕业一年内的候选人？',
+                      'jev_fit_unrelated': '不相关', 'jev_title_unrelated': '   '})
+        assert '新媒体/电商运营岗位' in jm.TITLE_QUESTIONS['title_fit']['instructions']
+        assert jm.QUESTIONS['stage']['instructions'] == '岗位是否接受2025届毕业一年内的候选人？'
+        assert jm.HARD_QUESTIONS['stage'][1] == jm.QUESTIONS['stage']['instructions']
+        assert jm.QUESTIONS['fit']['criteria'][0] == '不相关'
+        # 空白值不覆盖缺省
+        assert '纯技术研发' in jm.TITLE_QUESTIONS['title_fit']['criteria']['1']
+    finally:
+        jm.configure({})

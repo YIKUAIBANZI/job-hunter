@@ -22,6 +22,7 @@ from jev_match import (
     format_result,
     latest_match,
     load_jev_key,
+    configure as configure_jev,
     match_job,
     match_title,
     title_protected,
@@ -425,6 +426,7 @@ def run_approved(args, cfg, root, *, rest=paced_rest):
 
 def main():
     cfg = load_config()
+    configure_jev(cfg)
     args = parse_common_args(
         CITY_CODES,
         default_count=cfg["default_count"],

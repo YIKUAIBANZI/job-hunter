@@ -360,6 +360,7 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
 
 def main(platform, city_codes, argv=None):
     cfg = load_config()
+    jev.configure(cfg)
     args = parse_args(city_codes, argv, platform=platform,
                       default_count=cfg['default_count'], default_min_score=cfg['min_score'])
     # 延迟连接：冷却、配置和校准门禁检查在 execute 里先于 search 完成。

@@ -50,6 +50,15 @@ python3 -m pip install DrissionPage pytest
 
 复制 `config.example.json` 为 `config.json`，配置 UTF-8 文本简历路径、`job_profile`、`resume_redact`、公司黑名单等。不要将个人配置、简历、日志、浏览器目录或密钥提交到 Git。
 
+Jev 的标题粗筛、身份阶段、能力匹配提问默认按“2027 届求 AI 产品实习”编写。求职方向不同时，在 `config.json` 中覆盖（均为可选字符串）：
+
+| 字段 | 默认 | 用途 |
+|---|---|---|
+| `jev_direction` | 产品/AI产品方向实习 | 标题粗筛：是否可能是候选人想要的方向 |
+| `jev_title_unrelated` | 销售、剪辑、设计、编剧、标注、教练、客服、纯技术研发 | 标题粗筛：明显无关的例子 |
+| `jev_stage_question` | 岗位是否接受在校生实习或2027届应届生？… | 硬条件“在校/应届”的完整提问 |
+| `jev_fit_unrelated` | 不相关或非产品岗（如销售、剪辑、纯运营） | 能力匹配最低档描述 |
+
 ## 一键日跑与日报
 
 `daily.py` 只通过子进程调用现有入口，不增加投递流程或依赖。一次调用等到全部平台及后处理结束，覆盖生成 `日报.md`，最后在 stdout 打印一行摘要；上层 agent 读取退出码和日报即可，无需轮询。

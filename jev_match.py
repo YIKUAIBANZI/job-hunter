@@ -22,35 +22,57 @@ LATEST_MAX_AGE = timedelta(days=7)
 MAX_CONSECUTIVE_FAILURES = 3
 ACTION_LABELS = {"0": "投", "1": "复核", "2": "跳"}
 
-TITLE_QUESTIONS = {
-    "title_fit": {
-        "type": "choice",
-        "instructions": "仅根据岗位标题和标签，这个岗位是否可能是候选人想要的产品/AI产品方向实习？",
-        "criteria": {"0": "可能相关", "1": "明显无关（如销售、剪辑、设计、编剧、标注、教练、客服、纯技术研发）"},
-    },
+# 求职画像相关的提问片段；config.json 可用同名 jev_* 字段覆盖，缺省即作者本人画像原文
+# （缺省时生成的问题与旧版逐字相同，缓存不失效）。
+DEFAULT_PROFILE_TEXT = {
+    "jev_direction": "产品/AI产品方向实习",
+    "jev_title_unrelated": "销售、剪辑、设计、编剧、标注、教练、客服、纯技术研发",
+    "jev_stage_question": "岗位是否接受在校生实习或2027届应届生？若JD明确为社招全职或要求工作年限，则为否；未说明时按岗位标题判断。",
+    "jev_fit_unrelated": "不相关或非产品岗（如销售、剪辑、纯运营）",
 }
 
-# 硬条件拆成三问取最小值：合并成一问时概率被压低且不稳定（实测同一 JD 0.27/0.16），
-# 拆开后能说清卡在哪一项。
-HARD_QUESTIONS = {
-    "edu": ("学历", "岗位对学历/学校层次（如985/211/QS排名/硕士）的明确要求，候选人是否满足？JD未提及视为满足。"),
-    "stage": ("在校/应届", "岗位是否接受在校生实习或2027届应届生？若JD明确为社招全职或要求工作年限，则为否；未说明时按岗位标题判断。"),
-    "schedule": ("到岗/时长/城市", "岗位对每周到岗天数、实习时长、工作城市的明确要求，候选人是否满足？JD未提及视为满足。"),
-}
 
-QUESTIONS = {
-    **{k: {"type": "noul", "instructions": q} for k, (_, q) in HARD_QUESTIONS.items()},
-    "fit": {
-        "type": "score",
-        "instructions": "候选人的项目经历与能力，与该岗位核心职责的匹配程度",
-        "criteria": ["不相关或非产品岗（如销售、剪辑、纯运营）", "少量相关", "部分匹配", "高度匹配"],
-    },
-    "action": {
-        "type": "choice",
-        "instructions": "综合判断该岗位应如何处理",
-        "criteria": {"0": "推荐投递", "1": "需要人工复核", "2": "跳过"},
-    },
-}
+def build_questions(text=None):
+    """返回 (TITLE_QUESTIONS, HARD_QUESTIONS, QUESTIONS)。"""
+    t = {**DEFAULT_PROFILE_TEXT, **(text or {})}
+    title = {
+        "title_fit": {
+            "type": "choice",
+            "instructions": f"仅根据岗位标题和标签，这个岗位是否可能是候选人想要的{t['jev_direction']}？",
+            "criteria": {"0": "可能相关", "1": f"明显无关（如{t['jev_title_unrelated']}）"},
+        },
+    }
+    # 硬条件拆成三问取最小值：合并成一问时概率被压低且不稳定（实测同一 JD 0.27/0.16），
+    # 拆开后能说清卡在哪一项。
+    hard = {
+        "edu": ("学历", "岗位对学历/学校层次（如985/211/QS排名/硕士）的明确要求，候选人是否满足？JD未提及视为满足。"),
+        "stage": ("在校/应届", t["jev_stage_question"]),
+        "schedule": ("到岗/时长/城市", "岗位对每周到岗天数、实习时长、工作城市的明确要求，候选人是否满足？JD未提及视为满足。"),
+    }
+    questions = {
+        **{k: {"type": "noul", "instructions": q} for k, (_, q) in hard.items()},
+        "fit": {
+            "type": "score",
+            "instructions": "候选人的项目经历与能力，与该岗位核心职责的匹配程度",
+            "criteria": [t["jev_fit_unrelated"], "少量相关", "部分匹配", "高度匹配"],
+        },
+        "action": {
+            "type": "choice",
+            "instructions": "综合判断该岗位应如何处理",
+            "criteria": {"0": "推荐投递", "1": "需要人工复核", "2": "跳过"},
+        },
+    }
+    return title, hard, questions
+
+
+TITLE_QUESTIONS, HARD_QUESTIONS, QUESTIONS = build_questions()
+
+
+def configure(cfg) -> None:
+    """按 config.json 的 jev_* 字段重建提问；入口脚本加载配置后调用一次。"""
+    global TITLE_QUESTIONS, HARD_QUESTIONS, QUESTIONS
+    text = {k: cfg[k] for k in DEFAULT_PROFILE_TEXT if isinstance(cfg.get(k), str) and cfg[k].strip()}
+    TITLE_QUESTIONS, HARD_QUESTIONS, QUESTIONS = build_questions(text)
 
 
 class JevError(Exception):
