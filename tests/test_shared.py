@@ -363,7 +363,7 @@ def test_boss_match_policy_defaults_to_review_gate():
 def test_boss_apply_uses_effective_decision():
     # Boss 详情评分后必须经过 review-gate，不能直接用方案 B 结果
     from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "boss_apply.py").read_text()
+    src = (Path(__file__).resolve().parents[1] / "src" / "boss_apply.py").read_text()
     assert 'decision = effective_decision(result, args.match_policy)' in src
 
 

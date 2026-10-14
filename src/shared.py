@@ -11,6 +11,9 @@ from urllib.parse import urlsplit
 from DrissionPage import ChromiumOptions, ChromiumPage
 from jev_match import DEFAULT_PROFILE_TEXT
 
+# 源码位于 src/，配置、个人数据与示例统一相对项目根解析。
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 BOSS_JOB_ID_PATTERN = r"(?:^|/)job_detail/([A-Za-z0-9_-]+)\.html$"
 
 
@@ -97,7 +100,7 @@ def effective_config(cfg: dict) -> dict:
 
 def load_config(skill_dir: Path | None = None) -> dict:
     """读取用户配置。优先 config.json，缺省字段用 DEFAULT_CONFIG 补齐。"""
-    skill_dir = skill_dir or Path(__file__).parent
+    skill_dir = skill_dir or PROJECT_ROOT
     cfg_file = skill_dir / "config.json"
     cfg = {}
     if cfg_file.exists():
@@ -260,7 +263,7 @@ def parse_common_args(
         p.add_argument("--degree", default="", help="Boss 学历要求，逗号分隔，如 本科,大专（空=不限）")
     args = p.parse_args(argv)
     if include_matcher and args.matcher not in ("jev", "llm", "keyword"):
-        p.error('配置中的 matcher 无效，请运行 python3 config_tool.py check')
+        p.error('配置中的 matcher 无效，请运行 python3 src/config_tool.py check')
     if not args.job and not getattr(args, 'approved', False):
         p.error('必须提供 --job，或使用 --approved')
     if getattr(args, 'approved', False):
@@ -320,7 +323,7 @@ def load_applied_index(skill_dir: Path | None = None) -> set[str]:
     跨搜索、跨平台生效；删除某个 log 文件即自动"遗忘"对应记录。
     坏文件/缺字段一律跳过，不抛异常。
     """
-    skill_dir = skill_dir or Path(__file__).parent
+    skill_dir = skill_dir or PROJECT_ROOT
     index: set[str] = set()
     for log_file in (skill_dir / 'data' / 'logs').glob("*-log.json"):
         try:

@@ -11,9 +11,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import shared
 from shared import log_path, state_path, report_path
 
-ROOT = Path(__file__).resolve().parent
 PLATFORMS = ('boss', 'liepin', 'yingjiesheng', '51job', 'yupao')
 BUCKETS = ('applied', 'pending', 'review', 'skipped', 'failed')
 TIMEOUT = 90 * 60
@@ -214,7 +214,7 @@ def _review_ids(path):
 
 def run_daily(plan, *, live=False, no_rest=False, root=None) -> dict:
     """顺序编排并收集本轮报告数据；不调用入口的任何内部函数。"""
-    root = Path(root) if root is not None else ROOT
+    root = Path(root) if root is not None else shared.PROJECT_ROOT
     started = time.monotonic()
     now = datetime.now().astimezone()
     run_dir = state_path(root, 'runs') / now.strftime('%Y-%m-%d')
@@ -246,7 +246,7 @@ def run_daily(plan, *, live=False, no_rest=False, root=None) -> dict:
             if remaining <= 0:
                 row['status'] = '配额满'
                 break
-            command = [sys.executable, f'{platform}_apply.py', '--job', keyword,
+            command = [sys.executable, str(shared.PROJECT_ROOT / 'src' / f'{platform}_apply.py'), '--job', keyword,
                        '--city', plan['city'], '--count', str(remaining), *item['args']]
             if not live:
                 command.append('--dry-run')
@@ -302,7 +302,7 @@ def run_daily(plan, *, live=False, no_rest=False, root=None) -> dict:
     inbox_ok = False
     for name, args in steps:
         path = run_dir / f'{name}.log'
-        code, output = _run([sys.executable, f'{name}.py', *args], path, root)
+        code, output = _run([sys.executable, str(shared.PROJECT_ROOT / 'src' / f'{name}.py'), *args], path, root)
         note = f'{name}：退出码 {code}；日志 {path.relative_to(root).as_posix()}'
         results['notes'].append(note)
         if name == 'review_list' and code == 0:
@@ -359,9 +359,9 @@ def main(argv=None):
     parser.add_argument('--no-rest', action='store_true', help='跳过平台间休息，仅供测试/调试')
     args = parser.parse_args(argv)
     try:
-        cfg = json.loads((ROOT / 'config.json').read_text(encoding='utf-8'))
+        cfg = json.loads((shared.PROJECT_ROOT / 'config.json').read_text(encoding='utf-8'))
         path = Path(args.plan)
-        plan = load_plan(path if path.is_absolute() else ROOT / path, cfg)
+        plan = load_plan(path if path.is_absolute() else shared.PROJECT_ROOT / path, cfg)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     results = run_daily(plan, live=args.live, no_rest=args.no_rest)

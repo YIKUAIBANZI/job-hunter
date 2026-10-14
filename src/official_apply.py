@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib import error, request
 from urllib.parse import unquote, urlsplit
 
+import shared
 from jev_match import JEV_MODEL, JEV_URL, JevError, load_jev_key
 from shared import cache_path, extract_emails, log_path, report_path
 
@@ -538,7 +539,7 @@ def main(argv=None) -> int:
     if not emails_only and not jev_key:
         print("缺少 JEV_API_KEY：请设置环境变量或 ~/.config/jobhunter/jev.env。", file=sys.stderr)
         return 1
-    directory = Path(__file__).resolve().parent
+    directory = shared.PROJECT_ROOT
     companies = collect_companies(directory)
     manual_forms = collect_manual_forms(directory)
     if args.company is not None:

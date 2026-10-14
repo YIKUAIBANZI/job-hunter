@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import shared
 import inbox_report as report
 
 NOW = datetime(2026, 10, 14, 18, 0, tzinfo=timezone(timedelta(hours=8)))
@@ -130,7 +131,7 @@ def offline(monkeypatch, tmp_path):
 
     monkeypatch.setattr(socket.socket, 'connect', forbidden)
     monkeypatch.setattr(socket, 'create_connection', forbidden)
-    monkeypatch.setattr(report, '__file__', str(tmp_path / 'inbox_report.py'))
+    monkeypatch.setattr(shared, 'PROJECT_ROOT', tmp_path)
     sleeps, checks, tabs = [], [], []
     monkeypatch.setattr(report.time, 'sleep', sleeps.append)
     monkeypatch.setattr(report.random, 'uniform', lambda a, b: a)

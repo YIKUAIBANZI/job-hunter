@@ -7,6 +7,7 @@ from datetime import datetime
 
 import pytest
 
+import shared
 import apply_tracker as tracker
 
 NOW = datetime(2026, 10, 14, 12, 0)
@@ -33,7 +34,7 @@ def row(path='campus', **fields):
 
 @pytest.fixture(autouse=True)
 def offline(monkeypatch, tmp_path):
-    monkeypatch.setattr(tracker, 'ROOT', tmp_path)
+    monkeypatch.setattr(shared, 'PROJECT_ROOT', tmp_path)
     def forbidden(*args, **kwargs):
         pytest.fail('网申进度不允许联网或启动子进程')
     monkeypatch.setattr(socket, 'create_connection', forbidden)

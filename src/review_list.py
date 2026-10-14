@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+import shared
 from shared import load_applied_index, report_path
 
 PLATFORMS = ('boss', 'liepin', 'yingjiesheng', '51job', 'yupao')
@@ -129,7 +130,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='离线生成/更新复核清单，保留人工勾选')
     parser.add_argument('--city', help='只收集该城市，默认收集全部城市')
     args = parser.parse_args(argv)
-    root = Path(__file__).parent
+    root = shared.PROJECT_ROOT
     path = report_path(root, REVIEW_FILE)
     approved = parse_approved(path.read_text(encoding='utf-8')) if path.exists() else set()
     rows = load_review_rows(root, args.city)

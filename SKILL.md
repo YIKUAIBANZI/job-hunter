@@ -10,14 +10,14 @@ origin: local
 
 ## 目录规则
 
-1. 不在项目根目录新建运行时文件；新增输出必须经过 `shared.py` 的路径函数：人看的 Markdown 用 `report_path/queue_path` 写到 `reports/`，程序状态用 `log_path/cooldown_path/cache_path/state_path` 写到 `data/` 对应子目录。路径函数不创建目录；每个写函数在写入前创建父目录，原子写临时文件与目标同目录。
-2. 新增测试放 `tests/`，文档与交接放 `docs/`；入口与模块保持根目录平铺。
+1. 不在项目根目录新建运行时文件；新增输出必须经过 `src/shared.py` 的路径函数：人看的 Markdown 用 `report_path/queue_path` 写到 `reports/`，程序状态用 `log_path/cooldown_path/cache_path/state_path` 写到 `data/` 对应子目录。路径函数不创建目录；每个写函数在写入前创建父目录，原子写临时文件与目标同目录。
+2. 新增测试放 `tests/`，文档与交接放 `docs/`；代码在 `src/` 内平铺，根目录不放 `.py`；配置、计划、简历、示例与运行时输出统一相对 `shared.PROJECT_ROOT` 解析。
 3. 个人文件（`config.json`、`daily.json`、简历、`chrome-debug/`、`data/`、`reports/`）一律不提交。
 4. 从旧版平铺布局升级：首次运行前由维护者按 [README 的迁移命令](README.md#从旧布局迁移) 把旧文件移入新目录；不要直接运行后把旧日志遗漏当作没有投递历史。
 
 ## 首次使用
 
-`config.json` 不存在或 `python3 config_tool.py check` 不通过时执行。一次性问清以下清单中尚未知的信息；已有配置用 `set` 修复，不重新初始化。
+`config.json` 不存在或 `python3 src/config_tool.py check` 不通过时执行。一次性问清以下清单中尚未知的信息；已有配置用 `set` 修复，不重新初始化。
 
 1. 简历文件路径（UTF-8 txt/md，PDF 请用户另存文本）和需要脱敏的姓名等词，映射 `resume_path`、`resume_redact`。
 2. 目标城市、身份（届别/在校或社招）、求职方向与岗位关键词，映射 `city`、`target_roles`、`job_profile`。偏好同时写明每周到岗天数、工作城市、实习时长等已知条件，不虚构经历。
@@ -27,20 +27,20 @@ origin: local
 6. 用以下非交互命令写入，再跑 `check`。提醒用户在端口 9222 的 Chrome 中登录各平台，51job 需完善在线简历。`--no-chrome` 只跳过 TCP 探测，不能证明登录就绪。
 
 ```bash
-python3 config_tool.py init --resume ./resume.md --city 深圳 --matcher keyword
-python3 config_tool.py fields
-python3 config_tool.py set resume_redact "张三"
-python3 config_tool.py set target_roles "运营，电商运营"
-python3 config_tool.py set job_profile "用户确认的身份、求职方向、城市与到岗条件"
+python3 src/config_tool.py init --resume ./resume.md --city 深圳 --matcher keyword
+python3 src/config_tool.py fields
+python3 src/config_tool.py set resume_redact "张三"
+python3 src/config_tool.py set target_roles "运营，电商运营"
+python3 src/config_tool.py set job_profile "用户确认的身份、求职方向、城市与到岗条件"
 # 将用户看过的四段 jev_* 文本分别 set 写入
-python3 config_tool.py check
+python3 src/config_tool.py check
 ```
 
 `init` 不覆盖现有配置。每次 `set/unset` 原子写入后自动 check，检查失败退出码为 1，修改仍已保存；汇总尚缺项目并修复，不能把它误认为写入失败。提示默认画像是提醒，不单独视为阻塞；方向不同时必须同步更换文本。
 
 ## 修改参数
 
-用户说“方向改成运营”“换便宜模型”等自然语言时，agent 查 `python3 config_tool.py fields` 映射字段，直接 `set`，不让用户编辑 JSON。列表可用中文或英文逗号；数值与后端枚举由工具校验。改方向/身份时同步更新 `target_roles/job_profile` 和四段 `jev_*` 文本；换服务商/模型时更新 `matcher/llm.base_url/llm.model/llm.api_key_env` 中对应字段。可选字段用 `unset` 回到默认值，不能删除简历、岗位列表和画像等必填项。
+用户说“方向改成运营”“换便宜模型”等自然语言时，agent 查 `python3 src/config_tool.py fields` 映射字段，直接 `set`，不让用户编辑 JSON。列表可用中文或英文逗号；数值与后端枚举由工具校验。改方向/身份时同步更新 `target_roles/job_profile` 和四段 `jev_*` 文本；换服务商/模型时更新 `matcher/llm.base_url/llm.model/llm.api_key_env` 中对应字段。可选字段用 `unset` 回到默认值，不能删除简历、岗位列表和画像等必填项。
 
 改完把 check 结果及待处理项告诉用户。各投递入口的城市和匹配器默认读配置，显式 CLI 参数优先。BOSS 改简历、偏好或提问后使用 `--refresh`，避免复用旧结论；其他平台会自动隔离材料摘要，LLM 还隔离接口与模型。
 
@@ -57,11 +57,11 @@ python3 config_tool.py check
 
 | 平台 | 入口 | 状态 |
 |---|---|---|
-| BOSS | `boss_apply.py` | 已实测 |
-| 猎聘 | `liepin_apply.py` | 已校准 |
-| 应届生求职网 | `yingjiesheng_apply.py` | 已校准 |
-| 51job | `51job_apply.py` | 已校准 |
-| 鱼泡 | `yupao_apply.py` | 已校准（对口岗位少，默认配额 0） |
+| BOSS | `src/boss_apply.py` | 已实测 |
+| 猎聘 | `src/liepin_apply.py` | 已校准 |
+| 应届生求职网 | `src/yingjiesheng_apply.py` | 已校准 |
+| 51job | `src/51job_apply.py` | 已校准 |
+| 鱼泡 | `src/yupao_apply.py` | 已校准（对口岗位少，默认配额 0） |
 
 状态与代码门禁有差异时，以具体证据和 `platform_adapters.CALIBRATED` 核对，不靠改文档解除门禁。推荐/复核/跳过只是匹配结论，不等于实投。
 
@@ -74,13 +74,13 @@ python3 config_tool.py check
 
 ## 复核、日跑与交付
 
-`python3 review_list.py [--city 深圳]` 生成 `reports/复核清单.md`。用户看过并勾选 `[x]` 后，BOSS/猎聘/应届生/鱼泡可用 `--approved --city 深圳 --count 1`；不搜索、不读简历/模型密钥、不调模型，仍核验详情身份、公司、冷却、去重与按钮，未校准平台仍须首单门禁。禁止 `--fill-queue`，BOSS 也禁止 `--fast/--ignore-cooldown`。
+`python3 src/review_list.py [--city 深圳]` 生成 `reports/复核清单.md`。用户看过并勾选 `[x]` 后，BOSS/猎聘/应届生/鱼泡可用 `--approved --city 深圳 --count 1`；不搜索、不读简历/模型密钥、不调模型，仍核验详情身份、公司、冷却、去重与按钮，未校准平台仍须首单门禁。禁止 `--fill-queue`，BOSS 也禁止 `--fast/--ignore-cooldown`。
 
-日跑 `python3 daily.py [--plan daily.json]` 默认 dry-run；只有对应平台与配额已授权才 `--live`。计划关键词必须精确属于 `target_roles`，不扩词；五平台配额与城市由 daily.json 决定，不能误用 default_count。顺序运行、不轮询；读取退出码、`reports/日报.md` 与 `data/runs/<日期>/` 日志，0 不代表配额全部完成。pending 停该平台，超时/风控不重试。
+日跑 `python3 src/daily.py [--plan daily.json]` 默认 dry-run；只有对应平台与配额已授权才 `--live`。计划关键词必须精确属于 `target_roles`，不扩词；五平台配额与城市由 daily.json 决定，不能误用 default_count。顺序运行、不轮询；读取退出码、`reports/日报.md` 与 `data/runs/<日期>/` 日志，0 不代表配额全部完成。pending 停该平台，超时/风控不重试。
 
-招呼语补发 `boss_greet.py` 默认预览，单独获发送授权才 `--send`。`inbox_report.py` 只读回复，不点击会话/标已读、不发消息；`apply_tracker.py` 只读本地官网缓存和岗位日志，网申由用户手动完成。官网入口发现仍是独立 Jev+搜索流程，不受 JD matcher 配置影响。
+招呼语补发 `src/boss_greet.py` 默认预览，单独获发送授权才 `--send`。`src/inbox_report.py` 只读回复，不点击会话/标已读、不发消息；`src/apply_tracker.py` 只读本地官网缓存和岗位日志，网申由用户手动完成。官网入口发现仍是独立 Jev+搜索流程，不受 JD matcher 配置影响。
 
-官网/邮箱清单用于汇总全平台对口公司，方便用户手动再投官网或 JD 邮箱：运行 `python3 official_apply.py`（有 Tavily/Jev 密钥时搜索官网）或 `python3 official_apply.py --emails-only`（仅日志邮箱及 30 天内已缓存官网，不联网）。缺少 Tavily 密钥自动降级为 emails-only。结果在 `reports/官网投递.md`，运行 `python3 apply_tracker.py` 在 `reports/网申进度.md` 跟踪，保留手填截止日期、状态和备注；邮箱入口为 `mailto:`，核验列为“JD邮箱”。
+官网/邮箱清单用于汇总全平台对口公司，方便用户手动再投官网或 JD 邮箱：运行 `python3 src/official_apply.py`（有 Tavily/Jev 密钥时搜索官网）或 `python3 src/official_apply.py --emails-only`（仅日志邮箱及 30 天内已缓存官网，不联网）。缺少 Tavily 密钥自动降级为 emails-only。结果在 `reports/官网投递.md`，运行 `python3 src/apply_tracker.py` 在 `reports/网申进度.md` 跟踪，保留手填截止日期、状态和备注；邮箱入口为 `mailto:`，核验列为“JD邮箱”。
 
 应届生企业补充信息状态继续做标题/JD 匹配：skip 保留原因，apply/review 记 `[需表单]` review 和 `manual_form: true`；任何模式均不提交。这类岗位按 ID 取最新并排除已投，在官网报告的“平台表单待手动投递（应届生）”和网申进度（核验列“平台表单”）中列出；只能用户去平台填表，不能通过批准队列自动投递。邮件投递建议标题：姓名-学校-岗位-到岗时间（请按 JD 要求），清单不写入用户个人信息。
 

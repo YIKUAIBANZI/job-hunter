@@ -7,6 +7,8 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
+
+import shared
 import llm_match
 
 from apply_runtime import (CHAT_INTERVAL, SUCCESS_REST_EVERY, SUCCESS_REST,
@@ -440,7 +442,7 @@ def main():
     )
     configure_jev({**cfg, "matcher": args.matcher})
     city_code = CITY_CODES.get(args.city, "100010000")
-    root = Path(__file__).parent
+    root = shared.PROJECT_ROOT
     log_file = log_path(root, "boss", args.city)
     queue_file = queue_path(root, "boss", args.city)
     cache_file = cache_path(root, "llm-cache.json" if args.matcher == "llm" else "jev-cache.json")
@@ -457,7 +459,7 @@ def main():
             raise SystemExit(2)
 
     if args.approved:
-        return run_approved(args, cfg, Path(__file__).parent)
+        return run_approved(args, cfg, shared.PROJECT_ROOT)
 
     log = load_log(log_file)
     applied_index = load_applied_index()
@@ -535,18 +537,18 @@ def main():
                 jev_key = llm_match.load_llm_key(settings)
                 if not jev_key or not llm_match.settings_ready(settings):
                     stop_reason = "LLM 缺少 base_url/model 或密钥"
-                    print("🛑 LLM 配置不完整：请运行 python3 config_tool.py check；未启动浏览器，不会降级。")
+                    print("🛑 LLM 配置不完整：请运行 python3 src/config_tool.py check；未启动浏览器，不会降级。")
                     raise SystemExit(2)
             else:
                 jev_key = load_jev_key()
                 if not jev_key:
                     stop_reason = "缺少 JEV_API_KEY"
-                    print("🛑🛑 Jev 模式缺少 JEV_API_KEY：请运行 python3 config_tool.py check；未启动浏览器，不会降级。")
+                    print("🛑🛑 Jev 模式缺少 JEV_API_KEY：请运行 python3 src/config_tool.py check；未启动浏览器，不会降级。")
                     raise SystemExit(2)
             try:
                 resume_path = Path(cfg["resume_path"]).expanduser()
                 if not resume_path.is_absolute():
-                    resume_path = Path(__file__).parent / resume_path
+                    resume_path = shared.PROJECT_ROOT / resume_path
                 resume_text = resume_path.read_text(encoding="utf-8")
                 if not resume_text.strip():
                     raise ValueError("空简历")

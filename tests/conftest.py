@@ -1,5 +1,6 @@
-"""从项目根运行测试时，平铺模块仍可直接导入。"""
+"""从项目根运行测试时，将 src/ 加入模块搜索路径。"""
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / 'src'))

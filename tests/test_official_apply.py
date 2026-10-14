@@ -11,6 +11,7 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
+import shared
 import official_apply as official
 
 NOW = datetime(2026, 10, 14, 12, tzinfo=timezone(timedelta(hours=8)))
@@ -456,7 +457,7 @@ def test_render_empty_and_partial_failures():
 
 @pytest.fixture
 def cli(monkeypatch, tmp_path):
-    monkeypatch.setattr(official, "__file__", str(tmp_path / "official_apply.py"))
+    monkeypatch.setattr(shared, 'PROJECT_ROOT', tmp_path)
     monkeypatch.setattr(official, "load_tavily_key", lambda: TAVILY_KEY)
     monkeypatch.setattr(official, "load_jev_key", lambda: JEV_KEY)
     return tmp_path

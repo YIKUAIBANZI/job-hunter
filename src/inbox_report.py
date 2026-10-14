@@ -247,11 +247,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     # 延迟导入，让纯函数及 --help 不依赖浏览器连接，也不读取个人配置。
+    import shared
     from apply_runtime import write_cooldown
     from boss_apply import page_block_reason
     from shared import connect_chrome, cooldown_remaining, load_log, log_path, cooldown_path, report_path
 
-    root = Path(__file__).parent
+    root = shared.PROJECT_ROOT
     cooldown_file = cooldown_path(root, 'boss')
     left = cooldown_remaining(cooldown_file, datetime.now().astimezone())
     if left:

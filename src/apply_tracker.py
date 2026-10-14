@@ -9,11 +9,11 @@ from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+import shared
 from official_apply import collect_companies, collect_manual_forms, is_aggregator, normalize_company
 
 from shared import EMAIL_PATTERN, cache_path, extract_emails, report_path
 
-ROOT = Path(__file__).resolve().parent
 STATES = ('未投', '已投', '笔试/测评', '面试', 'Offer', '结束')
 HEADERS = ('公司', '入口', '核验', '截止日期', '状态', '备注', '来源岗位')
 EXPIRED = '(缓存已过期)'
@@ -137,14 +137,14 @@ def build_rows(cache, previous, manual, companies=None, manual_forms=None) -> li
                      'verification': candidate['status'], 'jobs': jobs})
             if len(seen) == 2:
                 break
-    for company in companies if companies is not None else collect_companies(ROOT):
+    for company in companies if companies is not None else collect_companies(shared.PROJECT_ROOT):
         for email in company.get('emails', []):
             # 只使用日志中的合法投递地址，入口键按小写邮箱保留手工字段。
             if extract_emails(email) == [email.lower()]:
                 add({'company': company['company'], 'url': 'mailto:' + email.lower(),
                      'title': email.lower(), 'verification': 'JD邮箱',
                      'jobs': '、'.join(company.get('jobs', []))})
-    for form in manual_forms if manual_forms is not None else collect_manual_forms(ROOT):
+    for form in manual_forms if manual_forms is not None else collect_manual_forms(shared.PROJECT_ROOT):
         if _valid_url(form.get('url')):
             add({'company': form.get('company', ''), 'url': form['url'],
                  'title': form.get('job') or '岗位表单', 'verification': '平台表单',
@@ -213,9 +213,9 @@ def main(argv=None):
     manual = [{'company': company.strip(), 'url': url} for company, url in args.add or []]
     if any(not item['company'] or not _valid_url(item['url']) for item in manual):
         parser.error('--add 需要非空公司名及有效的 HTTP(S) URL 或 mailto:邮箱')
-    path = report_path(ROOT, '网申进度.md')
+    path = report_path(shared.PROJECT_ROOT, '网申进度.md')
     try:
-        cache_file = cache_path(ROOT, 'official-cache.json')
+        cache_file = cache_path(shared.PROJECT_ROOT, 'official-cache.json')
         cache = json.loads(cache_file.read_text(encoding='utf-8')) if cache_file.exists() else {}
         if not isinstance(cache, dict):
             raise ValueError('official-cache.json 必须是 JSON 对象')

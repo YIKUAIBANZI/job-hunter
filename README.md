@@ -4,12 +4,12 @@
 
 ## 目录结构
 
-入口与模块保持平铺，命令仍从项目根目录执行，例如 `python3 boss_apply.py ...`。路径统一由 `shared.py` 计算，写函数负责创建父目录。
+入口与模块在 `src/` 内保持平铺，命令从项目根目录执行，例如 `python3 src/boss_apply.py ...`。项目根统一由 `src/shared.py` 的 `PROJECT_ROOT` 定位，不依赖当前工作目录；输出路径由公共路径函数计算，写函数负责创建父目录。
 
 ```text
 jobhunter/
-├── README.md  SKILL.md  .gitignore
-├── *.py                         # 平铺入口与模块，命令不变
+├── README.md  SKILL.md  .gitignore  pytest.ini
+├── src/                         # 全部 18 个 .py，平铺入口与模块
 ├── config.example.json  daily.example.json  # 可提交的示例
 ├── config.json  daily.json  resume.*        # 个人文件，忽略，位置不变
 ├── reports/                     # 给人看的输出，忽略
@@ -78,17 +78,17 @@ BOSS 保留已实测流程，其余平台共用运行器。**离线测试或只�
 
 | 平台 | 入口 | 校准状态 |
 |---|---|---|
-| BOSS | `boss_apply.py` | 保留已实测流程 |
-| 猎聘 | `liepin_apply.py` | 已校准 |
-| 应届生求职网 `yingjiesheng` | `yingjiesheng_apply.py` | 已校准 |
-| 51job | `51job_apply.py` | 已校准 |
-| 鱼泡 | `yupao_apply.py` | 已校准（对口岗位少，默认配额 0） |
+| BOSS | `src/boss_apply.py` | 保留已实测流程 |
+| 猎聘 | `src/liepin_apply.py` | 已校准 |
+| 应届生求职网 `yingjiesheng` | `src/yingjiesheng_apply.py` | 已校准 |
+| 51job | `src/51job_apply.py` | 已校准 |
+| 鱼泡 | `src/yupao_apply.py` | 已校准（对口岗位少，默认配额 0） |
 
 应届生搜索与详情数据只监听页面自身请求，详情在自建标签直接导航并于结束关闭；投递须 ID + 标题一致、状态允许、原生点击“立即申请”。卡片已申请、转载或过期直接跳过；志愿替换、企业补充信息及简历不完整进入人工复核，均不调模型。详情状态检查先于标题粗筛与匹配缓存。可见 `.delivery-tip` 记录其文字并复核；点击后出现 `.el-dialog` 保留 pending 并停止，不点击任何弹窗按钮。
 
 应届生暂不支持 `--job-type/--experience/--degree`，非空参数直接报错，请用关键词 + Jev 硬条件。保持详情间隔 15–30 秒，每 5 个休息 90–180 秒，默认 `--max-views 20`。日志、冷却与缓存分别为 `data/logs/yingjiesheng-<城市>-log.json`、`data/cooldown/yingjiesheng-cooldown.json`、`data/cache/jev-yingjiesheng-cache.json`，均由现有忽略规则覆盖。
 
-51job 的完整 JD 取自搜索页自身请求的 `we.51job.com/api/job/search-pc`，只监听页面请求，不重放接口、不打开详情页。导航前开始监听，原生筛选后取最后一包 `resultbody.job.items`；按卡片 sensorsdata 的 jobId + jobTitle 关联，缺项、标题不一致或 JD 为空进入复核，不调 Jev。已申请岗位跳过；校招岗位（`isFromXyx=True`）交给 `yingjiesheng_apply.py`，转载/外跳/过期岗位跳过。投递按钮仍从列表卡片核验，首单校准门禁不变。本阶段仅离线验证。
+51job 的完整 JD 取自搜索页自身请求的 `we.51job.com/api/job/search-pc`，只监听页面请求，不重放接口、不打开详情页。导航前开始监听，原生筛选后取最后一包 `resultbody.job.items`；按卡片 sensorsdata 的 jobId + jobTitle 关联，缺项、标题不一致或 JD 为空进入复核，不调 Jev。已申请岗位跳过；校招岗位（`isFromXyx=True`）交给 `src/yingjiesheng_apply.py`，转载/外跳/过期岗位跳过。投递按钮仍从列表卡片核验，首单校准门禁不变。本阶段仅离线验证。
 
 共同流程包含：
 
@@ -116,15 +116,15 @@ python3 -m pip install DrissionPage pytest
 
 在该 Chrome 中手动登录目标平台。51job 还需填写在线简历。
 
-让自己的 agent 按 [SKILL.md](SKILL.md) 的首次使用清单，一次性收集简历路径、脱敏姓名、身份/届别、方向、城市与匹配方式，再用 `config_tool.py` 配置；也可手动调用：
+让自己的 agent 按 [SKILL.md](SKILL.md) 的首次使用清单，一次性收集简历路径、脱敏姓名、身份/届别、方向、城市与匹配方式，再用 `src/config_tool.py` 配置；也可手动调用：
 
 ```bash
-python3 config_tool.py init --resume ./resume.md --city 深圳 --matcher keyword
-python3 config_tool.py fields
-python3 config_tool.py set target_roles "AI产品，产品实习"
-python3 config_tool.py set job_profile "你的真实身份、方向、城市与到岗条件"
-python3 config_tool.py set resume_redact "需要隐去的姓名"
-python3 config_tool.py check
+python3 src/config_tool.py init --resume ./resume.md --city 深圳 --matcher keyword
+python3 src/config_tool.py fields
+python3 src/config_tool.py set target_roles "AI产品，产品实习"
+python3 src/config_tool.py set job_profile "你的真实身份、方向、城市与到岗条件"
+python3 src/config_tool.py set resume_redact "需要隐去的姓名"
+python3 src/config_tool.py check
 # 离线只检查文件/配置，跳过本机 TCP 探测：check --no-chrome
 ```
 
@@ -135,9 +135,9 @@ python3 config_tool.py check
 配置就绪后先试跑，审阅队列；获用户对具体平台/岗位或配额的真实投递授权后，才去掉 `--dry-run`，未校准平台先做首单校准：
 
 ```bash
-python3 boss_apply.py --job "AI产品" --count 2 --dry-run
+python3 src/boss_apply.py --job "AI产品" --count 2 --dry-run
 # 仅在已获对应授权、核对候选和平台状态后执行
-python3 boss_apply.py --job "AI产品" --count 1
+python3 src/boss_apply.py --job "AI产品" --count 1
 ```
 
 不要提交个人配置、简历、日志、浏览器目录、密钥或模型缓存。`.gitignore` 已覆盖 `data/`、`reports/` 和旧根目录模型缓存，兼容尚未迁移的个人文件。
@@ -177,27 +177,27 @@ LLM 配置示例（替换为自己的服务商和实际模型 ID；base_url 是�
 ```
 
 ```bash
-python3 config_tool.py set llm.base_url https://api.example.com/v1
-python3 config_tool.py set llm.model 服务商实际的模型ID
-python3 config_tool.py set matcher llm
+python3 src/config_tool.py set llm.base_url https://api.example.com/v1
+python3 src/config_tool.py set llm.model 服务商实际的模型ID
+python3 src/config_tool.py set matcher llm
 ```
 
-密钥读取顺序：`llm.api_key_env` 指定的环境变量 → `~/.config/jobhunter/llm.env` 中同名的 `JOBHUNTER_LLM_KEY=...` 行（可用单双引号包裹值）。密钥绝不写 config.json；变量名可用 `set llm.api_key_env 自定义变量名` 更换。缺 base_url/model/密钥时退出，提示 `python3 config_tool.py check`，不降级、不连接浏览器。
+密钥读取顺序：`llm.api_key_env` 指定的环境变量 → `~/.config/jobhunter/llm.env` 中同名的 `JOBHUNTER_LLM_KEY=...` 行（可用单双引号包裹值）。密钥绝不写 config.json；变量名可用 `set llm.api_key_env 自定义变量名` 更换。缺 base_url/model/密钥时退出，提示 `python3 src/config_tool.py check`，不降级、不连接浏览器。
 
 LLM 使用标准库 urllib POST `{base_url}/chat/completions`，temperature=0，优先 JSON response_format；HTTP 400 时仅去掉该字段重试一次。完整题目原文复用四个 `jev_*` 配置。合法非零概率分布会归一化；缺题、非法答案或请求失败进入人工复核，连续三次失败停止，阈值和 review-gate 与 Jev 共用。LLM 的分数或概率不是满足资格的证明。
 
-Jev 缓存文件名和键保持原样，位置统一为 `data/cache/`；LLM 使用 `data/cache/llm-cache.json`（BOSS）与 `data/cache/llm-<平台>-cache.json`，接口/模型也参与缓存键。两种模型缓存都只保存结构化判断与时间，不保存简历、JD 或密钥。官网入口发现 `official_apply.py` 是独立搜索+Jev 流程，不使用这里的 JD matcher 设置。
+Jev 缓存文件名和键保持原样，位置统一为 `data/cache/`；LLM 使用 `data/cache/llm-cache.json`（BOSS）与 `data/cache/llm-<平台>-cache.json`，接口/模型也参与缓存键。两种模型缓存都只保存结构化判断与时间，不保存简历、JD 或密钥。官网入口发现 `src/official_apply.py` 是独立搜索+Jev 流程，不使用这里的 JD matcher 设置。
 
 ## 一键日跑与日报
 
-`daily.py` 只通过子进程调用现有入口，不增加投递流程或依赖。一次调用等到全部平台及后处理结束，覆盖生成 `reports/日报.md`，最后在 stdout 打印一行摘要；上层 agent 读取退出码和日报即可，无需轮询。
+`src/daily.py` 只通过子进程调用现有入口，不增加投递流程或依赖。一次调用等到全部平台及后处理结束，覆盖生成 `reports/日报.md`，最后在 stdout 打印一行摘要；上层 agent 读取退出码和日报即可，无需轮询。
 
 ```bash
 cp daily.example.json daily.json
 # 先检查计划里的所有 keywords 都精确属于 config.json target_roles
-python3 daily.py                       # 默认试跑，所有投递入口加 --dry-run
-python3 daily.py --plan daily.json     # 也可指定其他计划路径
-python3 daily.py --live                # 仅在已授权的平台与配额范围内真投
+python3 src/daily.py                       # 默认试跑，所有投递入口加 --dry-run
+python3 src/daily.py --plan daily.json     # 也可指定其他计划路径
+python3 src/daily.py --live                # 仅在已授权的平台与配额范围内真投
 ```
 
 计划必须包含 `city`、五个平台的 `quota/keywords/args`，以及 `greet/inbox/review_list` 三个布尔值。关键词按完整字符串校验，不做包含匹配、不自动扩词，零配额平台也校验；越界或缺字段在启动任何子进程前报错。当前示例使用 `AI产品`、`产品实习`，应届生配额为 0、关键词为 `产品经理`；必须先将计划关键词与 `config.target_roles` 白名单对齐。旧四平台计划需要补齐 `yingjiesheng`。`AI产品经理` 与 `AI产品实习` 不因包含 `AI产品` 而被允许。
@@ -221,9 +221,9 @@ python3 daily.py --live                # 仅在已授权的平台与配额范围
 把 boss、猎聘、应届生、51job、鱼泡日志中 applied/review 的对口公司合并，方便再手动进行官网或邮件投递；skipped/failed/pending 不入选。评估读取 JD 时提取最多 5 个投递邮箱，日志只存邮箱字符串，不存 JD 原文。
 
 ```bash
-python3 official_apply.py                 # 有 Tavily、Jev 密钥时搜索并核验官网
-python3 official_apply.py --emails-only   # 离线：日志邮箱 + 30 天内已缓存官网
-python3 apply_tracker.py                 # 离线更新网申进度，保留手填字段
+python3 src/official_apply.py                 # 有 Tavily、Jev 密钥时搜索并核验官网
+python3 src/official_apply.py --emails-only   # 离线：日志邮箱 + 30 天内已缓存官网
+python3 src/apply_tracker.py                 # 离线更新网申进度，保留手填字段
 ```
 
 清单输出到 `reports/官网投递.md`，进度跟踪在 `reports/网申进度.md`。缺少 Tavily 密钥时自动降级为 `--emails-only`，不调用 Tavily/Jev、不改官网缓存；`--refresh` 在离线模式不触发查询。官网“已核验”表示模型判断及链接可达，投递前仍需人工确认身份和岗位开放情况。邮件标题建议：姓名-学校-岗位-到岗时间（请按 JD 要求）。
@@ -233,8 +233,8 @@ python3 apply_tracker.py                 # 离线更新网申进度，保留手�
 ## 秋招网申进度（离线）
 
 ```bash
-python3 apply_tracker.py
-python3 apply_tracker.py --add 公司名 https://careers.example.com/campus
+python3 src/apply_tracker.py
+python3 src/apply_tracker.py --add 公司名 https://careers.example.com/campus
 ```
 
 只读取本地 `data/cache/official-cache.json` 和 `data/logs/*-log.json`，生成已忽略提交的 `reports/网申进度.md`；不联网、不打开浏览器、不自动填写任何网申表单。每家公司最多两个唯一官网入口，按“已核验”优先、official 概率降序选取；另外写入 JD 邮箱的 `mailto:` 入口（核验列“JD邮箱”）和需补表单的岗位入口（“平台表单”）。标题最多显示 30 字，来源岗位用“、”连接。缓存不存在时仍可维护邮箱、表单及手动入口；缓存损坏则报错并保留旧进度表。
@@ -247,14 +247,14 @@ python3 apply_tracker.py --add 公司名 https://careers.example.com/campus
 
 ```bash
 # 不调用第三方模型：先核对真实 ID、标题、完整 JD
-python3 liepin_apply.py --job "AI产品经理" --city 深圳 --experience 实习生 --degree 本科 \
+python3 src/liepin_apply.py --job "AI产品经理" --city 深圳 --experience 实习生 --degree 本科 \
   --count 2 --max-views 2 --max-pages 1 --dry-run --matcher keyword
-python3 51job_apply.py --job "AI产品经理" --city 深圳 --job-type 实习 \
+python3 src/51job_apply.py --job "AI产品经理" --city 深圳 --job-type 实习 \
   --experience 在校生/应届生 --degree 本科 --count 2 --max-views 2 --dry-run --matcher keyword
 # 27 届秋招校招岗位：工作类型用全职，工作年限用在校生/应届生
-python3 51job_apply.py --job "AI产品经理" --city 深圳 --job-type 全职 \
+python3 src/51job_apply.py --job "AI产品经理" --city 深圳 --job-type 全职 \
   --experience 在校生/应届生 --degree 本科 --count 2 --dry-run --matcher keyword
-python3 yupao_apply.py --job "AI产品实习" --city 深圳 \
+python3 src/yupao_apply.py --job "AI产品实习" --city 深圳 \
   --count 2 --max-views 2 --dry-run --matcher keyword
 
 # 已授权对应模型的数据外发并完成配置后，去掉 --matcher keyword 使用配置后端
@@ -290,8 +290,8 @@ Jev 密钥只读环境变量 `JEV_API_KEY`，或仓库外 `~/.config/jobhunter/j
 先离线汇总日志中的 `review`，人工看过岗位后将对应行的 `[ ]` 改为 `[x]`（也识别 `[X]`）：
 
 ```bash
-python3 review_list.py             # 全部城市
-python3 review_list.py --city 深圳  # 仅该城市
+python3 src/review_list.py             # 全部城市
+python3 src/review_list.py --city 深圳  # 仅该城市
 ```
 
 `reports/复核清单.md` 按平台分节、按时间倒序，平台+ID 去重取最新记录。重新生成保留仍在清单中的勾选；任意城市日志中已 `applied/pending` 的 ID 自动剔除。旧 BOSS 记录缺少时间时，同 ID 按日志最后一条处理。清单属于个人投递资料，已加入 `.gitignore`；每轮覆盖的 `reports/队列/<平台>-<城市>-队列.md` 仍只用于查看本轮结论。
@@ -299,11 +299,11 @@ python3 review_list.py --city 深圳  # 仅该城市
 已批准后可运行以下命令；此处仅说明用法，**本阶段仅离线测试，未实投验证批准路径**：
 
 ```bash
-python3 boss_apply.py --approved --city 深圳 --count 1
-python3 liepin_apply.py --approved --city 深圳 --count 1
+python3 src/boss_apply.py --approved --city 深圳 --count 1
+python3 src/liepin_apply.py --approved --city 深圳 --count 1
 # 新平台或重新校准：锁定已勾选 ID，授权后只尝试一次
-python3 yupao_apply.py --approved --city 深圳 --calibrate --count 1 --job-id 已确认的数字职位ID
-python3 yingjiesheng_apply.py --approved --city 深圳 --count 1
+python3 src/yupao_apply.py --approved --city 深圳 --calibrate --count 1 --job-id 已确认的数字职位ID
+python3 src/yingjiesheng_apply.py --approved --city 深圳 --count 1
 ```
 
 `--approved` 不需要 `--job`，只处理该平台、该城市日志中且在清单打勾的 ID；URL 和标题以日志为准，修改清单链接不会改变导航目标。不搜索列表、不读匹配缓存、不调用 Jev，也不需要 Jev key 或简历。传 `--dry-run` 可只核对批准详情而不点击。
@@ -318,9 +318,9 @@ BOSS 直接打开日志详情 URL，点击前复核 URL 中的 ID、`.job-banner
 
 ```bash
 # 仅在只读验证、登录、匹配结论及用户授权均完成后运行
-python3 liepin_apply.py --job "AI产品经理" --city 深圳 --experience 实习生 \
+python3 src/liepin_apply.py --job "AI产品经理" --city 深圳 --experience 实习生 \
   --count 1 --max-views 5 --job-id 已确认的数字职位ID --calibrate
-python3 yingjiesheng_apply.py --job "产品经理" --city 深圳 \
+python3 src/yingjiesheng_apply.py --job "产品经理" --city 深圳 \
   --calibrate --job-id 已确认的数字职位ID --count 1
 ```
 
@@ -339,7 +339,7 @@ python3 yingjiesheng_apply.py --job "产品经理" --city 深圳 \
 ## BOSS 现有入口
 
 ```bash
-python3 boss_apply.py --job "AI产品经理" --city 深圳 --count 2 --dry-run
+python3 src/boss_apply.py --job "AI产品经理" --city 深圳 --count 2 --dry-run
 ```
 
 BOSS 默认 `--match-policy review-gate`：Jev 建议复核的岗位一律进队列，不自动沟通；`--match-policy boss-b` 恢复旧方案 B。
@@ -347,8 +347,8 @@ BOSS 默认 `--match-policy review-gate`：Jev 建议复核的岗位一律进队
 可选：投完后给 HR 未回复的会话补发带岗位名的招呼语（默认只预览，`--send` 才发送；公司+岗位核对一致才发，HR 已回复跳过，发过的记在 `data/boss-greet.json` 不重发）：
 
 ```bash
-python3 boss_greet.py --city 深圳            # 预览
-python3 boss_greet.py --city 深圳 --send --count 10
+python3 src/boss_greet.py --city 深圳            # 预览
+python3 src/boss_greet.py --city 深圳 --send --count 10
 ```
 
 模板可在 `config.json` 用 `greeting_template` 配置，占位符 `{job}` `{company}` `{greeting}`。
@@ -358,8 +358,8 @@ BOSS 与新平台共用节奏常量、日志原子写入、平台 ID 索引和�
 ## 回复日报（只读）
 
 ```bash
-python3 inbox_report.py --city 深圳
-python3 inbox_report.py --city 深圳 --no-liepin
+python3 src/inbox_report.py --city 深圳
+python3 src/inbox_report.py --city 深圳 --no-liepin
 ```
 
 连接已启动的 Chrome，新开标签读取 BOSS 消息列表和猎聘首页，结束关闭自己开的标签。**不点击任何会话、不输入、不发送**；打开 BOSS 会话会标为已读，因此只读取 `.friend-content` 列表 DOM。页面等待 5–7 秒；BOSS 最多向下滚动 5 次，每次间隔 1.5–3 秒，按公司+招聘者姓名+列表时间去重。日报仅覆盖本轮加载到的会话，不保证完整历史覆盖。
@@ -372,15 +372,15 @@ python3 inbox_report.py --city 深圳 --no-liepin
 
 ## 代码与验证
 
-- `platform_runner.py`：匹配、缓存、去重、队列、运行上限、提交状态。
-- `config_tool.py`：首次配置、点路径修改、检查与自然语言字段映射。
-- `llm_match.py`：OpenAI 兼容接口、JSON 答案校验与概率归一化。
-- `platform_adapters.py`：搜索筛选、DOM 卡片、详情、按钮与标签生命周期。
-- `apply_runtime.py`：节奏、风控、提交预记、监听和证据核验。
-- `review_list.py`：离线复核清单与批准 ID 解析。
-- `inbox_report.py`：只读回复日报，纯函数与页面读取分离。
+- `src/platform_runner.py`：匹配、缓存、去重、队列、运行上限、提交状态。
+- `src/config_tool.py`：首次配置、点路径修改、检查与自然语言字段映射。
+- `src/llm_match.py`：OpenAI 兼容接口、JSON 答案校验与概率归一化。
+- `src/platform_adapters.py`：搜索筛选、DOM 卡片、详情、按钮与标签生命周期。
+- `src/apply_runtime.py`：节奏、风控、提交预记、监听和证据核验。
+- `src/review_list.py`：离线复核清单与批准 ID 解析。
+- `src/inbox_report.py`：只读回复日报，纯函数与页面读取分离。
 - 共同运行器的四个平台 `*_apply.py`：保留城市表及 CLI 入口。
-- `official_apply.py`：官网入口补全工具；日志、缓存与报告位置遵循新目录规则。
+- `src/official_apply.py`：官网入口补全工具；日志、缓存与报告位置遵循新目录规则。
 
 ```bash
 python3 -m pytest -q

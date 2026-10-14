@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+import shared
 import jev_match as jev
 import llm_match
 from apply_runtime import (CHAT_INTERVAL, SUCCESS_REST, SUCCESS_REST_EVERY,
@@ -47,7 +48,7 @@ def parse_args(city_codes, argv=None, *, platform='liepin', default_count=20, de
     p.add_argument('--calibrate', action='store_true', help='用户授权后仅真投 1 次，采集首单核验证据')
     args = p.parse_args(argv)
     if args.city not in city_codes or args.matcher not in ('jev', 'llm', 'keyword'):
-        p.error('配置中的 city/matcher 无效，请运行 python3 config_tool.py check')
+        p.error('配置中的 city/matcher 无效，请运行 python3 src/config_tool.py check')
     if platform == 'yingjiesheng' and any((args.job_type, args.experience, args.degree)):
         p.error(YJS_FILTER_REASON)
     if args.approved and platform == '51job':
@@ -150,11 +151,11 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                 key = llm_match.load_llm_key(jev.LLM_SETTINGS)
                 if not key or not llm_match.settings_ready(jev.LLM_SETTINGS):
                     # 与缺 Jev 密钥一致按 StopRun 结束；退出码 2 在 daily 中表示冷却，不能复用
-                    raise StopRun('LLM 缺少 base_url/model 或密钥；请运行 python3 config_tool.py check；不降级、不连接浏览器')
+                    raise StopRun('LLM 缺少 base_url/model 或密钥；请运行 python3 src/config_tool.py check；不降级、不连接浏览器')
             else:
                 key = jev.load_jev_key()
                 if not key:
-                    raise StopRun('缺少 JEV_API_KEY，请运行 python3 config_tool.py check；不降级、不连接浏览器')
+                    raise StopRun('缺少 JEV_API_KEY，请运行 python3 src/config_tool.py check；不降级、不连接浏览器')
             path = Path(cfg.get('resume_path', '')).expanduser()
             if not path.is_absolute():
                 path = root / path
@@ -415,4 +416,4 @@ def main(platform, city_codes, argv=None):
                 self.browser = connect_chrome()
             super().search(page)
     adapter = LazyAdapter(platform, None, args, city_codes[args.city])
-    return execute(platform, args, cfg, adapter, Path(__file__).parent)
+    return execute(platform, args, cfg, adapter, shared.PROJECT_ROOT)

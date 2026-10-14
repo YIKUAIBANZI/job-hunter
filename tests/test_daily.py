@@ -4,10 +4,12 @@ import json
 import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import shared
 import daily
 
 
@@ -29,7 +31,7 @@ def entry(job_id, **fields):
 
 @pytest.fixture(autouse=True)
 def offline(monkeypatch, tmp_path):
-    monkeypatch.setattr(daily, 'ROOT', tmp_path)
+    monkeypatch.setattr(shared, 'PROJECT_ROOT', tmp_path)
     def forbidden(*args, **kwargs):
         pytest.fail('日跑测试不允许真实子进程或休息')
     monkeypatch.setattr(daily.subprocess, 'run', forbidden)
@@ -53,7 +55,7 @@ def harness(monkeypatch, tmp_path):
         action = actions.pop(0) if actions else {}
         if action.get('exception'):
             raise action['exception']
-        platform = command[1].removesuffix('_apply.py')
+        platform = Path(command[1]).name.removesuffix('_apply.py')
         if platform in daily.PLATFORMS:
             path = tmp_path / 'data' / 'logs' / f'{platform}-深圳-log.json'
             log = json.loads(path.read_text()) if path.exists() else {}
@@ -147,7 +149,11 @@ def test_plan_safe_args(tmp_path):
 
 
 @pytest.mark.parametrize('live', [False, True])
-def test_main_mode_order_arguments_and_summary(harness, capsys, live):
+def test_main_mode_order_arguments_and_summary(harness, capsys, live, monkeypatch):
+    # 从其他目录调用时，配置、计划和子进程路径仍定位项目根。
+    elsewhere = harness.root / '其他工作目录'
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
     data = plan()
     for p in daily.PLATFORMS:
         data['platforms'][p].update(quota=1, keywords=['AI产品'])
@@ -155,7 +161,7 @@ def test_main_mode_order_arguments_and_summary(harness, capsys, live):
     write_json(harness.root / 'config.json', {'target_roles': ['AI产品']})
     write_json(harness.root / 'daily.json', data)
     assert daily.main(['--no-rest', *(['--live'] if live else [])]) == 0
-    assert [c[1] for c in harness.calls] == [f'{p}_apply.py' for p in daily.PLATFORMS]
+    assert [c[1] for c in harness.calls] == [str(harness.root / 'src' / f'{p}_apply.py') for p in daily.PLATFORMS]
     for command in harness.calls:
         assert command[0] == sys.executable
         assert command[2:8] == ['--job', 'AI产品', '--city', '深圳', '--count', '1']
@@ -237,7 +243,7 @@ def test_platform_exit_stops_keywords_continues_next(harness, code, status, exit
     data['platforms']['liepin'].update(quota=1, keywords=['AI产品'])
     harness.actions.append({'code': code})
     result = harness.execute(data, live=live)
-    assert [c[1] for c in harness.calls] == ['boss_apply.py', 'liepin_apply.py']
+    assert [c[1] for c in harness.calls] == [str(harness.root / 'src' / name) for name in ('boss_apply.py', 'liepin_apply.py')]
     assert result['platforms'][0]['status'] == status
     assert result['exit_code'] == exit_code
 
@@ -249,7 +255,7 @@ def test_new_blocked_overrides_zero_or_cooldown_exit(harness, row):
     data['platforms']['yupao'].update(quota=1, keywords=['AI产品'])
     harness.actions.append({'code': 2, 'add': {'failed': [row]}})
     result = harness.execute(data, live=True)
-    assert [c[1] for c in harness.calls] == ['liepin_apply.py', 'yupao_apply.py']
+    assert [c[1] for c in harness.calls] == [str(harness.root / 'src' / name) for name in ('liepin_apply.py', 'yupao_apply.py')]
     assert result['platforms'][1]['status'] == '风控'
     assert result['exit_code'] == 1
 
@@ -290,7 +296,7 @@ def test_timeout_preserves_partial_log_and_continues(harness, monkeypatch):
     data['platforms']['liepin'].update(quota=1, keywords=['AI产品'])
     original = daily.subprocess.run
     def run(command, **kwargs):
-        if command[1] == 'boss_apply.py':
+        if command[1] == str(harness.root / 'src' / 'boss_apply.py'):
             harness.calls.append(command)
             write_json(harness.root / 'data' / 'logs' / 'boss-深圳-log.json', {'pending': [entry('uncertain')]})
             raise subprocess.TimeoutExpired(command, daily.TIMEOUT)
@@ -314,7 +320,7 @@ def test_bad_log_stops_only_platform(harness, when):
         harness.actions.append({'corrupt': True})
     result = harness.execute(data)
     assert result['platforms'][0]['status'] == '异常'
-    assert harness.calls[-1][1] == 'liepin_apply.py'
+    assert harness.calls[-1][1] == str(harness.root / 'src' / 'liepin_apply.py')
 
 
 def test_platform_rest_random_in_dry_mode(harness, monkeypatch):
@@ -342,7 +348,7 @@ def test_post_steps_review_increment_inbox_header(harness, live):
         {'files': {'回复日报.md': '# 回复日报\n\n生成时间：今天\n\nBoss：会话 8｜HR 已回复 4｜已读未回 2\n'}}])
     result = harness.execute(data, live=live)
     expected = (['boss_greet.py'] if live else []) + ['review_list.py', 'inbox_report.py']
-    assert [c[1] for c in harness.calls] == expected
+    assert [c[1] for c in harness.calls] == [str(harness.root / 'src' / name) for name in expected]
     if live:
         assert harness.calls[0][2:] == ['--city', '深圳', '--send', '--count', '10']
     assert result['review_added'] == 1 and result['hr_replied'] == 4
@@ -451,8 +457,8 @@ def test_tracker_post_step_order_and_report(harness, live):
     from apply_tracker import render_tracker
     harness.actions.extend([{}, {}, {'files': {'网申进度.md': render_tracker([], datetime(2026, 10, 14))}}])
     result = harness.execute(plan(review_list=True, inbox=True, tracker=True), live=live)
-    assert [command[1] for command in harness.calls] == ['review_list.py', 'inbox_report.py', 'apply_tracker.py']
-    assert harness.calls[-1] == [sys.executable, 'apply_tracker.py']
+    assert [command[1] for command in harness.calls] == [str(harness.root / 'src' / name) for name in ('review_list.py', 'inbox_report.py', 'apply_tracker.py')]
+    assert harness.calls[-1] == [sys.executable, str(harness.root / 'src' / 'apply_tracker.py')]
     assert result['tracker'] == {'entries': 0, 'due': 0, 'note': '本次更新，详见 网申进度.md'}
     assert '网申入口 0 个，7 天内截止 0 个' in (harness.root / 'reports' / '日报.md').read_text()
 

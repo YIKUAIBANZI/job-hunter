@@ -4,6 +4,7 @@ from datetime import datetime
 
 import pytest
 
+import shared
 from shared import (cache_path, cooldown_path, load_applied_index, load_log,
                     log_path, queue_path, record, report_path, save_log, state_path)
 
@@ -73,7 +74,7 @@ def test_applied_index_only_scans_data_logs(tmp_path):
 
 def test_review_report_creates_parents_and_ignores_flat_logs(tmp_path, monkeypatch):
     import review_list
-    monkeypatch.setattr(review_list, '__file__', str(tmp_path / 'review_list.py'))
+    monkeypatch.setattr(shared, 'PROJECT_ROOT', tmp_path)
     old = {'review': [{'job_id': 'legacy', 'job': '旧岗位'}]}
     (tmp_path / 'boss-深圳-log.json').write_text(json.dumps(old))
     assert review_list.load_review_rows(tmp_path) == []
@@ -84,7 +85,7 @@ def test_review_report_creates_parents_and_ignores_flat_logs(tmp_path, monkeypat
 
 def test_tracker_report_creates_parents(tmp_path, monkeypatch):
     import apply_tracker
-    monkeypatch.setattr(apply_tracker, 'ROOT', tmp_path)
+    monkeypatch.setattr(shared, 'PROJECT_ROOT', tmp_path)
     assert apply_tracker.main([]) == 0
     assert '# 网申进度' in report_path(tmp_path, '网申进度.md').read_text()
 
@@ -103,3 +104,19 @@ def test_daily_report_and_run_writer_create_parents(tmp_path, monkeypatch):
     path = state_path(tmp_path, 'runs') / '测试日期' / 'boss-1.log'
     assert daily._run(['离线替身'], path, tmp_path) == (0, '')
     assert path.is_file()
+
+
+def test_default_project_root_ignores_current_directory(tmp_path, monkeypatch):
+    """从外部目录加载配置和去重索引时，不能误读 cwd 的同名文件。"""
+    root = tmp_path / '项目根'
+    elsewhere = tmp_path / '其他工作目录'
+    root.mkdir()
+    elsewhere.mkdir()
+    for directory, city, job_id in ((root, '深圳', 'project-job'),
+                                    (elsewhere, '北京', 'cwd-job')):
+        (directory / 'config.json').write_text(json.dumps({'city': city}), encoding='utf-8')
+        save_log({'pending': [{'job_id': job_id}]}, log_path(directory, 'boss', city))
+    monkeypatch.setattr(shared, 'PROJECT_ROOT', root)
+    monkeypatch.chdir(elsewhere)
+    assert shared.load_config()['city'] == '深圳'
+    assert shared.load_applied_index() == {'boss:project-job'}

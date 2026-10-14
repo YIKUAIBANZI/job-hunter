@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import shared
 import boss_apply as boss
 import jev_match as jev
 from shared import DEFAULT_CONFIG, load_applied_index, load_log
@@ -119,7 +120,7 @@ def harness(monkeypatch, tmp_path):
             status = next(chat_iter) if chat_iter else "chat_started"
             return status, f"测试 {status}", {"packets": []}, True
 
-        monkeypatch.setattr(boss, "__file__", str(tmp_path / "boss_apply.py"))
+        monkeypatch.setattr(shared, 'PROJECT_ROOT', tmp_path)
         monkeypatch.setattr(boss, "load_config", lambda: cfg)
         monkeypatch.setattr(boss, "load_applied_index", lambda: load_applied_index(tmp_path))
         monkeypatch.setattr(boss, "load_jev_key", lambda: "offline-only-key")
@@ -600,7 +601,7 @@ def approved_boss(monkeypatch, tmp_path):
             events.append('close')
 
     page = Page()
-    monkeypatch.setattr(boss, '__file__', str(tmp_path / 'boss_apply.py'))
+    monkeypatch.setattr(shared, 'PROJECT_ROOT', tmp_path)
     monkeypatch.setattr(boss, 'load_config', lambda: dict(DEFAULT_CONFIG))
     monkeypatch.setattr(boss, 'connect_chrome', lambda: events.append('connect') or page)
     monkeypatch.setattr(boss, 'page_block_reason', lambda p: state['blocked'])

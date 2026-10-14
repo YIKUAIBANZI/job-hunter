@@ -1,6 +1,7 @@
 """复核清单纯函数及离线文件更新。"""
 import json
 
+import shared
 import review_list as review
 from shared import load_applied_index
 
@@ -64,7 +65,7 @@ def test_cell_content_cannot_inject_approved_row():
 def test_regenerate_preserves_old_checks_and_city_filter(tmp_path, monkeypatch):
     (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
     (tmp_path / 'reports').mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(review, '__file__', str(tmp_path / 'review_list.py'))
+    monkeypatch.setattr(shared, 'PROJECT_ROOT', tmp_path)
     for city, job_id in [('深圳', 'a'), ('北京', 'b')]:
         (tmp_path / 'data' / 'logs' / f'boss-{city}-log.json').write_text(json.dumps({'review': [row(job_id=job_id)]}))
     (tmp_path / 'data' / 'logs' / 'boss-invalid-log.json').write_text('broken')
@@ -95,7 +96,7 @@ def test_approved_lookup_uses_log_url_only_and_skips_applied(tmp_path):
 def test_yjs_review_list_approval_regeneration_and_pending_exclusion(tmp_path,monkeypatch):
     (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
     (tmp_path / 'reports').mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(review,'__file__',str(tmp_path/'review_list.py'))
+    monkeypatch.setattr(shared, 'PROJECT_ROOT', tmp_path)
     candidate={**row('yingjiesheng','123'),'url':'https://q.yingjiesheng.com/jobdetail/123.html'}
     (tmp_path / 'data' / 'logs' / 'yingjiesheng-深圳-log.json').write_text(json.dumps({'review':[candidate]}))
     path=tmp_path / 'reports' / review.REVIEW_FILE

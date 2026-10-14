@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import shared
 import config_tool as tool
 from shared import DEFAULT_CONFIG, load_config
 REAL_PROBE = tool.probe_chrome_port
@@ -29,16 +30,21 @@ def store(tmp_path, cfg):
     (tmp_path / "config.json").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
 
 
-def test_init_from_example_without_overwrite(tmp_path, capsys):
+def test_init_from_example_without_overwrite(tmp_path, capsys, monkeypatch):
+    # 默认根目录同时约束示例、配置和相对简历路径，与 cwd 无关。
+    monkeypatch.setattr(shared, 'PROJECT_ROOT', tmp_path)
+    elsewhere = tmp_path / '其他工作目录'
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
     example = config(tmp_path)
     (tmp_path / "config.example.json").write_text(json.dumps(example), encoding="utf-8")
-    assert tool.main(["init", "--resume", "resume.md", "--city", "杭州", "--matcher", "keyword"], root=tmp_path) == 0
+    assert tool.main(["init", "--resume", "resume.md", "--city", "杭州", "--matcher", "keyword"]) == 0
     path = tmp_path / "config.json"
     original = path.read_bytes()
     cfg = json.loads(original)
     assert cfg["city"] == "杭州" and cfg["matcher"] == "keyword"
     assert cfg["skills"] == example["skills"]
-    assert tool.main(["init", "--resume", "other.md"], root=tmp_path) == 1
+    assert tool.main(["init", "--resume", "other.md"]) == 1
     assert path.read_bytes() == original
     assert "不覆盖；请用 set" in capsys.readouterr().out
 

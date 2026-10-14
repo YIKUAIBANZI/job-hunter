@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import shared
 from boss_apply import page_block_reason
 from shared import (connect_chrome, cooldown_remaining, load_config, load_log,
                     log_path, cooldown_path, state_path)
@@ -144,7 +145,7 @@ def main(argv=None):
     p.add_argument("--ignore-cooldown", action="store_true")
     args = p.parse_args(argv)
 
-    root = Path(__file__).parent
+    root = shared.PROJECT_ROOT
     cfg = load_config()
     log = load_log(log_path(root, "boss", args.city))
     greeted_file = state_path(root, "boss-greet.json")

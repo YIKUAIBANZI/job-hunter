@@ -130,7 +130,7 @@ def build_messages(state, questions):
 def request_answers(state, questions, settings, key, timeout=30):
     """仅 HTTP 400 重试一次，且去掉 response_format；其他错误交人工复核。"""
     if not settings_ready(settings) or not key:
-        raise JevError("LLM 配置不完整，请运行 python3 config_tool.py check")
+        raise JevError("LLM 配置不完整，请运行 python3 src/config_tool.py check")
     payload = {"model": settings["model"], "temperature": 0,
                "messages": build_messages(state, questions), "response_format": {"type": "json_object"}}
     url = settings["base_url"].rstrip("/") + "/chat/completions"

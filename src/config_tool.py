@@ -10,6 +10,7 @@ import tempfile
 from copy import deepcopy
 from pathlib import Path
 
+import shared
 import llm_match
 from jev_match import DEFAULT_PROFILE_TEXT, load_jev_key
 from shared import DEFAULT_CONFIG, effective_config
@@ -232,7 +233,7 @@ def show_config(cfg):
 
 
 def main(argv=None, *, root=None):
-    root = Path(root) if root is not None else Path(__file__).parent
+    root = Path(root) if root is not None else shared.PROJECT_ROOT
     parser = argparse.ArgumentParser(description="供 agent 使用的非交互配置工具；密钥只放环境变量或仓库外 env 文件")
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="从 config.example.json 初始化，绝不覆盖")
