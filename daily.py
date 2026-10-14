@@ -35,6 +35,8 @@ def load_plan(path, cfg) -> dict:
     for key in ('greet', 'inbox', 'review_list'):
         if type(plan[key]) is not bool:
             raise ValueError(f'{key} 必须是布尔值')
+    if 'tracker' in plan and type(plan['tracker']) is not bool:
+        raise ValueError('tracker 必须是布尔值')
     roles = cfg.get('target_roles') if isinstance(cfg, dict) else None
     if not isinstance(roles, list) or any(not isinstance(role, str) for role in roles):
         raise ValueError('config.json target_roles 必须是字符串列表')
@@ -136,8 +138,13 @@ def render_daily(results, now, mode) -> str:
               f'- 复核清单新增：{review_label}（日志新增复核 {review} 份）。'
               '打开 `复核清单.md`，人工看过后打勾，再用对应入口 `--approved`；51job 请在页面手动处理。',
               f'- HR 已回复：{replied if replied is not None else "未读取"}；'
-              f'{results.get("inbox_note", "详见 回复日报.md")}。', '',
-              '## 本次新增已投', '', '| 平台 | 公司 | 岗位 | 链接 |', '|---|---|---|---|']
+              f'{results.get("inbox_note", "详见 回复日报.md")}。']
+    if 'tracker' in results:
+        tracker = results['tracker']
+        summary = (f'网申入口 {tracker["entries"]} 个，7 天内截止 {tracker["due"]} 个'
+                   if tracker.get('entries') is not None else '网申入口：未读取统计')
+        lines.append(f'- {summary}；{tracker["note"]}。')
+    lines += ['', '## 本次新增已投', '', '| 平台 | 公司 | 岗位 | 链接 |', '|---|---|---|---|']
     total = 0
     for row in platforms:
         for entry in row['rows']['applied']:
@@ -280,6 +287,8 @@ def run_daily(plan, *, live=False, no_rest=False, root=None) -> dict:
         steps.append(('review_list', ['--city', plan['city']]))
     if plan['inbox']:
         steps.append(('inbox_report', ['--city', plan['city']]))
+    if plan.get('tracker', False):
+        steps.append(('apply_tracker', []))
     try:
         old_reviews = _review_ids(root / '复核清单.md') if plan['review_list'] else set()
     except (OSError, ValueError) as exc:
@@ -301,6 +310,20 @@ def run_daily(plan, *, live=False, no_rest=False, root=None) -> dict:
                 results['notes'].append(f'新复核清单不可读：{type(exc).__name__}')
         if name == 'inbox_report':
             inbox_ok = code == 0
+        if name == 'apply_tracker':
+            tracker = {'entries': None, 'due': None, 'note': '网申进度未生成或首部统计不可读'}
+            try:
+                # 仅取文件顶部统计，正文中的备注不能影响日报计数。
+                header = '\n'.join((root / '网申进度.md').read_text(encoding='utf-8').splitlines()[:10])
+                entries = re.search(r'^统计：入口数\s+(\d+)(?:｜|$)', header, re.M)
+                due = re.search(r'^即将截止（7 天内）：\s*(\d+)\s*个\s*$', header, re.M)
+                if entries and due:
+                    tracker.update(entries=int(entries[1]), due=int(due[1]),
+                                   note='本次更新，详见 网申进度.md' if code == 0 else
+                                   '已有网申进度，非本次更新，详见 网申进度.md')
+            except (OSError, ValueError) as exc:
+                results['notes'].append(f'网申进度不可读：{type(exc).__name__}')
+            results['tracker'] = tracker
         if name in ('boss_greet', 'inbox_report') and '风控：' in output:
             results['platforms'][0].update(status='风控', note=f'{name} 检测到风控，详见后处理日志')
     if not plan['review_list']:

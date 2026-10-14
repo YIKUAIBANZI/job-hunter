@@ -410,3 +410,67 @@ def test_diff_logs_counts_appended_review_and_skip_even_if_seen_before():
     result = diff_logs(before, after)
     assert result['review'] == 2 and result['skipped'] == 1
     assert result['applied'] == 0  # 已投仍按新 ID 计
+
+
+@pytest.mark.parametrize('value', [True, False])
+def test_plan_optional_tracker_boolean(tmp_path, value):
+    path = tmp_path / 'daily.json'
+    write_json(path, plan(tracker=value))
+    assert daily.load_plan(path, {'target_roles': ['AI产品', '产品实习']})['tracker'] is value
+
+
+@pytest.mark.parametrize('value', [1, None, 'true', []])
+def test_plan_rejects_invalid_tracker(tmp_path, value):
+    path = tmp_path / 'daily.json'
+    write_json(path, plan(tracker=value))
+    with pytest.raises(ValueError, match='tracker'):
+        daily.load_plan(path, {'target_roles': ['AI产品', '产品实习']})
+
+
+@pytest.mark.parametrize('live', [False, True])
+def test_tracker_post_step_order_and_report(harness, live):
+    from apply_tracker import render_tracker
+    harness.actions.extend([{}, {}, {'files': {'网申进度.md': render_tracker([], datetime(2026, 10, 14))}}])
+    result = harness.execute(plan(review_list=True, inbox=True, tracker=True), live=live)
+    assert [command[1] for command in harness.calls] == ['review_list.py', 'inbox_report.py', 'apply_tracker.py']
+    assert harness.calls[-1] == [sys.executable, 'apply_tracker.py']
+    assert result['tracker'] == {'entries': 0, 'due': 0, 'note': '本次更新，详见 网申进度.md'}
+    assert '网申入口 0 个，7 天内截止 0 个' in (harness.root / '日报.md').read_text()
+
+
+def test_tracker_reads_only_top_statistics_not_notes(harness):
+    md = ('# 网申进度\n\n生成时间：今天\n'
+          '统计：入口数 12｜未投 4｜已投 8\n即将截止（7 天内）：3 个\n'
+          + '\n' * 10 + '统计：入口数 999\n即将截止（7 天内）：999 个\n')
+    harness.actions.append({'files': {'网申进度.md': md}})
+    result = harness.execute(plan(tracker=True))
+    assert result['tracker']['entries'] == 12 and result['tracker']['due'] == 3
+    assert '网申入口 12 个，7 天内截止 3 个' in (harness.root / '日报.md').read_text()
+
+
+@pytest.mark.parametrize('enabled', [None, False])
+def test_tracker_default_off(harness, enabled):
+    data = plan() if enabled is None else plan(tracker=enabled)
+    result = harness.execute(data)
+    assert not harness.calls and 'tracker' not in result
+    assert '网申入口' not in (harness.root / '日报.md').read_text()
+
+
+def test_tracker_failure_marks_existing_statistics_stale(harness):
+    (harness.root / '网申进度.md').write_text('统计：入口数 8｜未投 8\n即将截止（7 天内）：2 个\n')
+    harness.actions.append({'code': 2})
+    result = harness.execute(plan(tracker=True))
+    assert result['tracker']['entries'] == 8 and '非本次更新' in result['tracker']['note']
+    md = (harness.root / '日报.md').read_text()
+    assert '网申入口 8 个，7 天内截止 2 个' in md and r'apply\_tracker：退出码 2' in md
+
+
+@pytest.mark.parametrize('content', [None, '没有统计', b'\xff'])
+def test_tracker_missing_or_unreadable_report_still_generates_daily(harness, content):
+    if isinstance(content, bytes):
+        (harness.root / '网申进度.md').write_bytes(content)
+    elif content is not None:
+        (harness.root / '网申进度.md').write_text(content)
+    result = harness.execute(plan(tracker=True))
+    assert result['tracker']['entries'] is None
+    assert '网申入口：未读取统计' in (harness.root / '日报.md').read_text()

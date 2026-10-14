@@ -8,5 +8,6 @@
   },
   "greet": false,
   "inbox": true,
-  "review_list": true
+  "review_list": true,
+  "tracker": true
 }
