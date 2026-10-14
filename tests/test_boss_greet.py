@@ -5,7 +5,7 @@ from boss_greet import build_greeting, load_greeted, pick_targets, save_greeted
 NOW = datetime(2026, 10, 14, 18, 0).astimezone()
 
 
-def entry(job_id, hours_ago, company="不负时光", job="AI研发实习生"):
+def entry(job_id, hours_ago, company="公司甲", job="AI研发实习生"):
     return {"job_id": job_id, "company": company, "job": job,
             "ts": (NOW - timedelta(hours=hours_ago)).isoformat()}
 
@@ -17,7 +17,7 @@ def test_build_greeting_strips_hello_and_fills_job():
 
 def test_build_greeting_custom_template():
     cfg = {"greeting": "期待沟通", "greeting_template": "{company}的{job}：{greeting}"}
-    assert build_greeting(cfg, entry("a", 1)) == "不负时光的AI研发实习生：期待沟通"
+    assert build_greeting(cfg, entry("a", 1)) == "公司甲的AI研发实习生：期待沟通"
 
 
 def test_pick_targets_window_dedup_and_order():

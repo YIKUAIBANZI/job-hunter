@@ -11,7 +11,7 @@
   "jev_stage_question": "岗位是否接受在校生实习或2027届应届生？若JD明确为社招全职或要求工作年限，则为否；未说明时按岗位标题判断。",
   "jev_fit_unrelated": "不相关或非产品岗（如销售、剪辑、纯运营）",
   "resume_path": "./resume.md",
-  "job_profile": "2027届本科在读，计算机专业，求 AI 产品经理实习（Agent 方向），深圳，每周5天、6个月起；非 985/211",
+  "job_profile": "2027届本科在读，XX专业，求 XX 方向实习，城市 XX，每周 X 天、X 个月起",
   "resume_redact": ["张三"],
   "greeting": "您好，我对贵司岗位非常感兴趣，期待进一步沟通！",
   "skills": ["Python", "React", "项目管理", "数据分析"],

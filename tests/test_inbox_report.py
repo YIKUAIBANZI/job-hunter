@@ -101,9 +101,9 @@ def test_liepin_status_and_platform_tips():
     for tip in ('您可以修改打招呼语，去修改＞＞', '我们为您生成了合适的打招呼语，去使用＞'):
         assert report.classify_boss_item({**item(), 'last_msg': tip}) == 'delivered'
     assert report.classify_boss_item({**item(), 'last_msg': '你好，看了你的简历，方便聊聊吗？'}) == 'replied'
-    md = report.render_report([], [{**item('冰兰'), 'job': '产品'}], NOW)
+    md = report.render_report([], [{**item('公司乙'), 'job': '产品'}], NOW)
     assert '猎聘：会话 1｜HR 已回复 1' in md and '## 猎聘｜HR 已回复（优先处理）' in md
-    assert '| 冰兰 | 产品 |' in md
+    assert '| 公司乙 | 产品 |' in md
 
 
 def test_render_empty_and_unmatched():

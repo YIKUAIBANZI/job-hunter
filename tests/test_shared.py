@@ -372,6 +372,6 @@ def test_applied_index_shares_ids_between_yingjiesheng_and_51job(tmp_path):
     import json
     from shared import load_applied_index
     (tmp_path / 'data' / 'logs' / 'yingjiesheng-深圳-log.json').write_text(json.dumps(
-        {'applied': [{'platform': 'yingjiesheng', 'job_id': '167341639', 'company': '九联', 'job': '产品助理'}]}))
+        {'applied': [{'platform': 'yingjiesheng', 'job_id': '100000001', 'company': '公司丙', 'job': '产品助理'}]}))
     index = load_applied_index(tmp_path)
-    assert {'yingjiesheng:167341639', '51job:167341639'} <= index
+    assert {'yingjiesheng:100000001', '51job:100000001'} <= index

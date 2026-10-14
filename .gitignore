@@ -46,3 +46,6 @@ evidence/*.json
 evidence/platform-validation-*.md
 llm-cache.json*
 llm-*-cache.json*
+
+# 个人交接/工作日志（含本机路径与投递记录）
+docs/mmr.md

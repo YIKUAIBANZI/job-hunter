@@ -439,7 +439,7 @@ def test_unknown_business_envelope_retained_but_not_accepted():
     packet=SimpleNamespace(url='https://api-c.liepin.com/api/open-chat',
                            response=SimpleNamespace(body={'flag':1,'data':{'private':'DO_NOT_LOG'},'message':'PRIVATE'},status=200),
                            request=SimpleNamespace(postData={'jobId':'85442155','userId':'DO_NOT_LOG'}))
-    info=rt.packet_info(packet,'1985442155')
+    info=rt.packet_info(packet,'1912345601')
     assert info['business_flags']=={'flag':1}
     assert info['body_fields']==['data','flag','message']
     assert info['request_job_ids']==['85442155'] and not info['correlated']
@@ -459,21 +459,21 @@ def test_other_host_urls_recorded_without_query(checks):
 
 def test_liepin_open_chat_flag_alias_correlates_and_applies():
     url='https://api-c.liepin.com/api/com.liepin.im.c.chat.open-chat'
-    pkt=SimpleNamespace(url=url,request=SimpleNamespace(postData='{"jobId":"75191697"}'),
+    pkt=SimpleNamespace(url=url,request=SimpleNamespace(postData='{"jobId":"12345678"}'),
                         response=SimpleNamespace(status=200,body={'flag':1,'data':{}}))
     adapter=adapters.PlatformAdapter.__new__(adapters.PlatformAdapter); adapter.platform='liepin'
-    info=rt.packet_info(pkt,'1975191697',adapter.request_id_aliases('1975191697'))
+    info=rt.packet_info(pkt,'1912345678',adapter.request_id_aliases('1912345678'))
     assert info['correlated']
     assert rt.classify_response(info,adapters.VERIFIED_ENDPOINTS['liepin'])=='applied'
     bad={**info,'business_flags':{'flag':0}}
     assert rt.classify_response(bad,adapters.VERIFIED_ENDPOINTS['liepin'])=='failed'
-    assert rt.packet_info(pkt,'1975191697')['correlated'] is False  # 无别名不关联
+    assert rt.packet_info(pkt,'1912345678')['correlated'] is False  # 无别名不关联
 
 
 def test_calibrated_platforms_and_alias_scoped():
     a=adapters.PlatformAdapter.__new__(adapters.PlatformAdapter)
     a.platform='yupao'
-    assert a.request_id_aliases('1975191697')==set()
+    assert a.request_id_aliases('1912345678')==set()
     assert adapters.CALIBRATED=={'liepin','yingjiesheng','51job'}
 
 

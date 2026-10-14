@@ -6,7 +6,7 @@ origin: local
 
 # Job Hunter
 
-使用者是用户和用户自己的 agent。先读 `docs/mmr.md` 恢复当前状态，命令与筛选细节查 [README.md](README.md)。已有简历、偏好和授权沿用，不重复询问。
+使用者是用户和用户自己的 agent。若本地有 `docs/mmr.md`（个人交接日志，不提交）先读它恢复当前状态，命令与筛选细节查 [README.md](README.md)。已有简历、偏好和授权沿用，不重复询问。
 
 ## 目录规则
 

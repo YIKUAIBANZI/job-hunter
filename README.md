@@ -23,7 +23,7 @@ jobhunter/
 │   ├── boss-greet.json
 │   ├── runs/<日期>/...          # daily 子进程输出
 │   └── evidence/               # 校准证据
-├── docs/                        # mmr.md、platform-upgrade-spec.md，提交
+├── docs/                        # platform-upgrade-spec.md 提交；mmr.md 为本地个人交接日志，不提交
 ├── tests/                       # test_*.py、conftest.py，提交
 └── chrome-debug/                # 浏览器用户目录，忽略，位置不变
 ```
@@ -32,7 +32,7 @@ jobhunter/
 - `data/`：程序状态；`logs/` 保存投递与防重日志，`cache/` 保存模型及官网缓存，`cooldown/` 保存冷却截止时间。
 - `data/runs/`：按日期保存日跑子进程输出。
 - `data/evidence/`：保存校准 JSON 和平台验证报告，个人证据只留本地。
-- `docs/`：提交项目交接与开发规格；恢复上下文先读 [docs/mmr.md](docs/mmr.md)，升级规格见 [docs/platform-upgrade-spec.md](docs/platform-upgrade-spec.md)。
+- `docs/`：开发规格（提交）；`docs/mmr.md` 是本地个人交接日志（含投递记录，已忽略不提交），升级规格见 [docs/platform-upgrade-spec.md](docs/platform-upgrade-spec.md)。
 - `tests/`：离线回归测试，支持 `python3 -m pytest -q` 与 `python3 -m pytest -q tests`。
 - `chrome-debug/`：保留浏览器用户目录；个人配置、日跑计划和简历仍相对项目根解析。
 
