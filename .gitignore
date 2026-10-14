@@ -4,9 +4,22 @@ resume.md
 resume.pdf
 resume.txt
 resume.docx
+resume.*
+
+# 新布局的运行时文件；旧根目录规则继续兼容未迁移用户
+data/
+reports/
 
 # 投递日志
 *-log.json
+jev-cache.json
+jev-cache.json.tmp
+*-队列.md
+复核清单.md
+回复日报.md
+日报.md
+daily.json
+runs/
 
 # Python
 __pycache__/
@@ -19,3 +32,20 @@ chrome-debug/
 
 # macOS
 .DS_Store
+boss-cooldown.json
+official-cache.json
+官网投递.md
+网申进度.md
+
+*-cooldown.json
+jev-*-cache.json*
+*-log.json.tmp
+boss-greet.json
+# 校准证据含投递公司/职位，仅本地保留
+evidence/*.json
+evidence/platform-validation-*.md
+llm-cache.json*
+llm-*-cache.json*
+
+# 个人交接/工作日志（含本机路径与投递记录）
+docs/mmr.md

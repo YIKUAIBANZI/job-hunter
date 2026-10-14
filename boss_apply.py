@@ -2,19 +2,51 @@
 """Boss直聘自动投递脚本（DrissionPage版）"""
 
 import json
+import random
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlencode, urlsplit
+import llm_match
 
+from apply_runtime import (CHAT_INTERVAL, SUCCESS_REST_EVERY, SUCCESS_REST,
+                           VIEW_INTERVAL, VIEW_REST_EVERY, VIEW_REST,
+                           paced_rest, write_cooldown)
+from review_list import approved_review_rows
+
+from platform_runner import effective_decision
+from jev_match import (
+    MAX_CONSECUTIVE_FAILURES,
+    JevError,
+    backend_cache_id,
+    build_state,
+    clean_jd,
+    format_result,
+    latest_match,
+    load_jev_key,
+    configure as configure_jev,
+    match_job,
+    match_title,
+    title_protected,
+    redact_resume,
+    render_queue_md,
+)
 from shared import (
+    BOSS_JOB_ID_PATTERN,
+    log_path, cooldown_path, cache_path, queue_path,
+    classify_boss_chat_response,
     connect_chrome,
+    cooldown_remaining,
     dedup_key,
     is_blacklisted,
     load_applied_index,
     load_config,
     load_log,
     parse_common_args,
+    parse_boss_job_id,
     print_summary,
     record,
+    save_log,
     score_jd,
 )
 
@@ -31,6 +63,369 @@ CITY_CODES = {
     "南京": "101190100",
 }
 
+# Boss 搜索筛选代码，来自 /wapi/zpgeek/pc/all/filter/conditions.json（2026-10-14 抓取）
+JOB_TYPES = {"不限": "", "全职": "1901", "实习": "1902", "兼职": "1903"}
+EXPERIENCES = {"在校生": "108", "应届生": "102", "经验不限": "101", "1年以内": "103",
+               "1-3年": "104", "3-5年": "105", "5-10年": "106", "10年以上": "107"}
+DEGREES = {"初中及以下": "209", "中专/中技": "208", "高中": "206", "大专": "202",
+           "本科": "203", "硕士": "204", "博士": "205"}
+
+
+def _codes(value, table, label):
+    """逗号分隔的中文选项 → 逗号分隔代码；未知选项直接报错，不静默忽略。"""
+    names = [v.strip() for v in (value or "").replace("，", ",").split(",") if v.strip()]
+    unknown = [n for n in names if n not in table]
+    if unknown:
+        raise SystemExit(f"🛑 未知{label}: {unknown}，可选: {list(table)}")
+    return ",".join(table[n] for n in names if table[n])
+
+
+def build_search_url(job, city_code, job_type="实习", experience="", degree=""):
+    params = [("city", city_code)]
+    for key, value in (("jobType", _codes(job_type, JOB_TYPES, "求职类型")),
+                       ("experience", _codes(experience, EXPERIENCES, "工作经验")),
+                       ("degree", _codes(degree, DEGREES, "学历"))):
+        if value:
+            params.append((key, value))
+    params.append(("query", job))
+    return "https://www.zhipin.com/web/geek/jobs?" + urlencode(params, safe=",")
+
+
+# 调试快模式不改变接口核验窗口；默认保留慢节奏。
+CHAT_TARGET = "friend/add"
+CHAT_RESPONSE_TIMEOUT = 8
+FAST_INTERVAL = (3, 6)
+FAST_VIEW_INTERVAL = (1, 3)
+FAST_VIEW_REST = (3, 6)
+BROWSE_JITTER = 0.25
+
+# 一次读取整页卡片；与纯函数共用职位路径正则，避免两套 ID 提取规则漂移。
+CARD_SNAPSHOT_JS = """
+    const pattern = new RegExp(arguments[0]);
+    return Array.from(document.querySelectorAll('.job-card-wrap')).map(c => {
+        let job_id = '';
+        for (const a of c.querySelectorAll('a[href]')) {
+            try {
+                const url = new URL(a.getAttribute('href'), location.href);
+                if (!['http:', 'https:'].includes(url.protocol)) continue;
+                const match = url.pathname.match(pattern);
+                if (match) { job_id = match[1]; break; }
+            } catch (_) {}
+        }
+        const text = selector => c.querySelector(selector)?.textContent.trim() || '';
+        return {job_id, title: text('.job-name'),
+                company: text('.company-name') || text('.boss-name'), salary: text('.job-salary'),
+                tags: Array.from(c.querySelectorAll('.tag-list > *')).map(t => t.textContent.trim())};
+    });
+"""
+
+
+def pick_boss_tab(tabs):
+    """按现有顺序选第一个 Boss 岗位列表标签，不操作浏览器。"""
+    return next((tab for tab in tabs if any(path in (tab.url or "") for path in (
+        "zhipin.com/web/geek/jobs", "zhipin.com/web/geek/job"))), None)
+
+
+def browse_sleep(seconds):
+    """浏览/读取 JD 的等待加 ±25% 抖动。"""
+    time.sleep(random.uniform(
+        seconds * (1 - BROWSE_JITTER), seconds * (1 + BROWSE_JITTER)
+    ))
+
+
+DETAIL_TITLE_JS = """
+    const h = document.querySelector('.job-detail-header .job-name')
+        || document.querySelector('.job-detail-info .job-name');
+    return h ? h.textContent.trim() : '';
+"""
+
+
+def wait_detail_title(page, title, timeout=6):
+    """等右侧详情标题与卡片标题一致；超时返回 False。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if (page.run_js(DETAIL_TITLE_JS) or "") == title.strip():
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def page_block_reason(page):
+    """只检测风控 URL 和可见验证组件/弹层，不扫描 JD 正文中的“验证”等词。"""
+    # 只看路径：登录后正常列表页也会带 ?_security_check= 参数
+    path = urlsplit(page.url).path.lower()
+    if any(word in path for word in ("verify", "security", "captcha")):
+        return "页面跳转至验证/安全检查"
+    return page.run_js("""
+        const visible = e => e.getClientRects().length > 0 &&
+            getComputedStyle(e).visibility !== 'hidden' &&
+            getComputedStyle(e).display !== 'none';
+        const widgets = document.querySelectorAll(
+            '.verify-dialog, .verify-modal, .verify-wrap, .captcha-dialog, ' +
+            '.geetest_panel, .nc-container, [id*="captcha"], [class*="captcha"], ' +
+            'iframe[src*="verify"], iframe[src*="security"], iframe[src*="captcha"]');
+        for (const e of widgets) {
+            if (visible(e)) return (e.innerText || '页面出现验证组件').slice(0, 200);
+        }
+        const dialogs = document.querySelectorAll(
+            '[role="dialog"], .dialog-container, .dialog-wrap, .dialog, .modal, .boss-popup');
+        for (const e of dialogs) {
+            const text = e.innerText || '';
+            if (visible(e) && /验证|上限|频繁|异常/.test(text)) return text.slice(0, 200);
+        }
+        return '';
+    """) or ""
+
+
+def wait_chat_response(page, evidence):
+    """收集本次点击后 8 秒内的命中包；任一风控响应立即终止等待。"""
+    status, reason = classify_boss_chat_response(None)
+    deadline = time.monotonic() + CHAT_RESPONSE_TIMEOUT
+    timeout = CHAT_RESPONSE_TIMEOUT
+    while timeout > 0:
+        packet = page.listen.wait(timeout=timeout, raise_err=False)
+        if not packet:
+            break
+        response = packet.response
+        body = response.body
+        if isinstance(body, (str, bytes)):
+            try:
+                body = json.loads(body)
+            except (ValueError, UnicodeDecodeError):
+                body = {}
+        body = body if isinstance(body, dict) else {}
+        info = {
+            "url": packet.url,
+            "http_status": response.status,
+            "code": body.get("code"),
+            "message": body.get("message"),
+        }
+        # 原样保留 URL、HTTP 状态、code；message 仅日志截断，判定使用全文。
+        evidence["packets"].append({
+            **info,
+            "message": info["message"][:200] if isinstance(info["message"], str) else info["message"],
+        })
+        result, result_reason = classify_boss_chat_response(info)
+        if result == "blocked":
+            return result, result_reason
+        if result == "chat_started" or status != "chat_started":
+            status, reason = result, result_reason
+        timeout = deadline - time.monotonic()
+    return status, reason
+
+
+def boss_detail_url(url, job_id):
+    p = urlsplit(url)
+    return (p.scheme in ('http', 'https') and
+            (p.hostname == 'zhipin.com' or (p.hostname or '').endswith('.zhipin.com'))
+            and parse_boss_job_id(url) == job_id)
+
+
+def detail_chat_button(page, job_id, title):
+    """详情页点击前重新核对 URL、标题和按钮的明确接口路径。"""
+    if not boss_detail_url(page.url, job_id):
+        return None, 'review', '详情 URL 与批准岗位 ID 不匹配'
+    current_title = page.run_js('''
+        const h=document.querySelector('.job-banner .name h1') || document.querySelector('h1');
+        return h ? h.textContent.trim() : '';
+    ''') or ''
+    if not title.strip() or current_title.strip() != title.strip():
+        return None, 'review', '详情标题与日志岗位不匹配'
+    button = page.ele('css:a.btn-startchat', timeout=1)
+    if button and button.text.strip() == '继续沟通':
+        return None, 'skipped', '已沟通'
+    if (not button or button.text.strip() != '立即沟通'
+            or not (button.attr('data-url') or '').startswith('/wapi/zpgeek/friend/add.json')
+            or button.attr('disabled') is not None or button.attr('aria-disabled') == 'true'):
+        return None, 'review', '详情沟通按钮不存在、不可用或接口路径不匹配'
+    return button, '', ''
+
+
+def start_chat(page, job_id, *, detail_title=None, before_click=None):
+    """先监听再点击；点击结果或核验过程异常时保守记 pending，避免重复提交。"""
+    evidence = {"target": CHAT_TARGET, "packets": []}
+    clicked = False
+    listening = False
+    status, reason = "failed", "未点击立即沟通"
+    try:
+        page.listen.start(CHAT_TARGET)
+        listening = True
+        if detail_title is not None:
+            button, status, reason = detail_chat_button(page, job_id, detail_title)
+            if button is None:
+                result = 'unavailable'
+            # 批准模式只接受已持久化的 pending；不提供无预记的详情提交路径。
+            elif before_click is None:
+                status, reason = 'review', '缺少提交前 pending 预记，未点击'
+                result = 'unavailable'
+            else:
+                before_click()
+                clicked = True
+                button.click(by_js=False)
+                result = 'clicked'
+        else:
+            # JS 执行若异常，无法证明点击未发生，按已尝试处理。
+            clicked = True
+            # 按钮 ka="cpc_job_list_chat_<job_id>"，点击前再核一次是不是当前岗位
+            result = page.run_js("""
+            const b = document.querySelector('.op-btn-chat');
+            if (!b || b.classList.contains('is-disabled') || b.disabled) return 'disabled';
+            if (!(b.getAttribute('ka') || '').endsWith(arguments[0])) return 'mismatch';
+            b.click();
+            return 'clicked';
+            """, job_id)
+        clicked = result == "clicked"
+        if clicked:
+            status, reason = wait_chat_response(page, evidence)
+            # 页面兜底：弹出"已向BOSS发送消息"也算成功证据，然后点"留在此页"关掉
+            confirmed = page.run_js("""
+                const d = document.querySelector('.greet-boss-container');
+                return !!d && /已向BOSS发送消息/.test(d.innerText || '');
+            """)
+            evidence["page_confirmed"] = bool(confirmed)
+            if confirmed and status == "pending":
+                status, reason = "chat_started", "页面弹窗确认"
+            page.run_js("const c=document.querySelector('.greet-boss-container .cancel-btn'); if(c) c.click();")
+        elif result == 'unavailable':
+            pass
+        elif result == "mismatch":
+            reason = "沟通按钮不属于当前岗位，未点击"
+        else:
+            reason = "立即沟通按钮不存在或不可用"
+    except Exception as e:
+        evidence["error"] = str(e)[:200]
+        status = "pending" if clicked else "failed"
+        reason = "点击后结果未知" if clicked else "监听启动失败，未点击"
+    finally:
+        # 必须在任何返回搜索页/休息之前检查，不能把验证页面刷掉。
+        try:
+            evidence["page_url"] = page.url
+            block_reason = page_block_reason(page)
+            if block_reason:
+                evidence["page_blocked"] = block_reason
+                status, reason = "blocked", block_reason
+        except Exception as e:
+            evidence["page_check_error"] = str(e)[:200]
+        if listening:
+            try:
+                page.listen.stop()
+            except Exception as e:
+                evidence["listen_stop_error"] = str(e)[:200]
+    return status, reason, evidence, clicked
+
+
+def run_approved(args, cfg, root, *, rest=paced_rest):
+    """只打开日志中的批准详情，提交核验仍由 start_chat 完成。"""
+    log_file = log_path(root, 'boss', args.city)
+    cooldown_file = cooldown_path(root, 'boss')
+    log, index = load_log(log_file), load_applied_index(root)
+    counts = dict(applied=0, pending=0, skipped=0, views=0)
+    page = None
+    current = {'platform': 'boss'}
+
+    def persist(bucket, entry):
+        record(log, log_file, bucket, {**entry, 'ts': datetime.now().astimezone().isoformat()})
+
+    def check():
+        reason = page_block_reason(page)
+        if reason:
+            write_cooldown(cooldown_file, reason)
+            persist('failed', {**current, 'status': 'blocked', 'reason': reason})
+            raise SystemExit(1)
+
+    try:
+        # 此函数也可直接测试；不能依赖调用者跳过冷却检查。
+        if cooldown_remaining(cooldown_file, datetime.now().astimezone()):
+            print('Boss 风控冷却中，未连接浏览器。')
+            raise SystemExit(2)
+        candidates = approved_review_rows(root, 'boss', args.city)
+        if not candidates:
+            print('没有本城市可投递的 BOSS 人工批准岗位。')
+            return counts
+        browser = connect_chrome()
+        page = browser.new_tab()
+        for source in candidates:
+            if (counts['applied'] >= args.count or counts['views'] >= args.max_views
+                    or args.dry_run and counts['views'] >= args.count):
+                break
+            current = entry = {**source, 'decision': 'apply'}
+            job_id = entry['job_id']
+            id_key = f'boss:{job_id}'
+            company_key = dedup_key(entry.get('company'), entry.get('job')) if entry.get('company') else ''
+            if id_key in index or company_key and company_key in index:
+                persist('skipped', {**entry, 'reason': '已投递或待核验（跨运行去重）'})
+                counts['skipped'] += 1
+                continue
+            if is_blacklisted(entry.get('company', ''), cfg):
+                persist('skipped', {**entry, 'reason': '公司黑名单'})
+                counts['skipped'] += 1
+                continue
+            if not company_key or not boss_detail_url(entry.get('url', ''), job_id):
+                persist('review', {**entry, 'reason': '公司身份缺失或日志详情 URL 与 ID 不匹配'})
+                continue
+            page.get(entry['url'])
+            counts['views'] += 1
+            check()
+            rest(VIEW_INTERVAL, check)
+            if counts['views'] % VIEW_REST_EVERY == 0:
+                rest(VIEW_REST, check)
+            button, status, reason = detail_chat_button(page, job_id, entry.get('job', ''))
+            if button is None:
+                persist('skipped' if status == 'skipped' else 'review', {**entry, 'reason': reason})
+                counts['skipped'] += status == 'skipped'
+                continue
+            if args.dry_run:
+                print(f"[dry-run 核验通过] {entry.get('company')} | {entry.get('job')}")
+                continue
+            check()
+
+            def before_click():
+                persist('pending', {**entry, 'status': 'pending', 'attempted': True,
+                                    'reason': '提交前预记，异常退出时禁止重投'})
+                index.add(id_key)
+                index.add(company_key)
+                counts['pending'] += 1
+
+            status, reason, evidence, clicked = start_chat(
+                page, job_id, detail_title=entry['job'], before_click=before_click)
+            entry.update(status=status, reason=reason, evidence=evidence, attempted=clicked)
+            if clicked:
+                bucket = 'applied' if status == 'chat_started' else 'pending'
+                if bucket == 'applied':
+                    entry['reason'] = '[人工批准]' + reason
+                log['pending'] = [e for e in log['pending'] if e.get('job_id') != job_id]
+                log[bucket].append({**entry, 'ts': datetime.now().astimezone().isoformat()})
+                save_log(log, log_file)
+                if bucket == 'applied':
+                    counts['applied'] += 1
+                    counts['pending'] -= 1
+            elif status != 'blocked':
+                persist('skipped' if status == 'skipped' else 'review', entry)
+                counts['skipped'] += status == 'skipped'
+            if status == 'blocked':
+                write_cooldown(cooldown_file, reason)
+                persist('failed', entry)
+                raise SystemExit(1)
+            if clicked and status != 'chat_started':
+                print('提交结果待核验，已保留 pending，停止本轮。')
+                break
+            if clicked:
+                rest(CHAT_INTERVAL, check)
+                if counts['applied'] % SUCCESS_REST_EVERY == 0:
+                    rest(SUCCESS_REST, check)
+    except Exception as exc:
+        if page is not None:
+            check()
+        persist('review', {**current, 'reason': f'批准投递中断：{type(exc).__name__}；请检查 pending'})
+    finally:
+        if page is not None:
+            try:
+                page.close()
+            except Exception:
+                pass
+        print_summary('Boss直聘（人工批准）', counts['applied'], counts['skipped'], log_file, counts['pending'])
+    return counts
+
 
 def main():
     cfg = load_config()
@@ -38,224 +433,393 @@ def main():
         CITY_CODES,
         default_count=cfg["default_count"],
         default_min_score=cfg["min_score"],
+        default_city=cfg.get("city", "深圳"),
+        default_matcher=cfg.get("matcher", "jev"),
+        include_matcher=True,
     )
+    configure_jev({**cfg, "matcher": args.matcher})
     city_code = CITY_CODES.get(args.city, "100010000")
-    log_file = Path(__file__).parent / f"boss-{args.city}-log.json"
+    root = Path(__file__).parent
+    log_file = log_path(root, "boss", args.city)
+    queue_file = queue_path(root, "boss", args.city)
+    cache_file = cache_path(root, "llm-cache.json" if args.matcher == "llm" else "jev-cache.json")
+    cooldown_file = cooldown_path(root, "boss")
+    if not args.ignore_cooldown:
+        remaining = cooldown_remaining(cooldown_file, datetime.now().astimezone())
+        if remaining is not None:
+            try:
+                reason = json.loads(cooldown_file.read_text(encoding="utf-8")).get("reason", "风控冷却")
+            except (OSError, ValueError, AttributeError):
+                reason = "风控冷却"
+            minutes = int(remaining.total_seconds() / 60) + 1
+            print(f"🛑 Boss 风控冷却中，剩余约 {minutes} 分钟：{reason}；未连接浏览器。")
+            raise SystemExit(2)
+
+    if args.approved:
+        return run_approved(args, cfg, Path(__file__).parent)
 
     log = load_log(log_file)
     applied_index = load_applied_index()
     applied_count = 0
+    pending_count = 0
     skipped_count = 0
-    seen_titles = set()
-
-    target_job = args.job
+    dry_run_count = 0
+    view_count = 0
+    seen_job_ids = set()
     target_count = args.count
+    rows = []
+    consecutive_jev_failures = 0
+    stop_reason = ""
 
-    print(
-        f"🎯 Boss直聘 | 岗位: {target_job} | 城市: {args.city} | 目标: {target_count} 份"
-    )
-    print("🔗 连接 Chrome（端口 9222）...")
-    page = connect_chrome()
+    def summary():
+        stats = {"city": args.city, "dry_run": args.dry_run,
+                 "apply": sum(r.get("decision") == "apply" for r in rows),
+                 "review": sum(r.get("decision") == "review" for r in rows),
+                 "skip": sum(r.get("decision") == "skip" or r.get("status") == "already_contacted"
+                             for r in rows), "applied": applied_count,
+                 "pending": pending_count, "stop_reason": stop_reason}
+        queue_file.parent.mkdir(parents=True, exist_ok=True)
+        queue_file.write_text(render_queue_md(rows, stats), encoding="utf-8")
+        print_summary("Boss直聘", applied_count, skipped_count, log_file, pending=pending_count)
+        print(f"📋 推荐: {stats['apply']} 份  复核: {stats['review']} 份 | 队列: {queue_file}")
+        print(f"👀 本轮打开详情: {view_count}/{args.max_views}")
+        if stop_reason:
+            print(f"停止原因：{stop_reason}")
+        if args.dry_run:
+            print(f"🧪 dry-run 已评分: {dry_run_count} 份（仅打印，未发起沟通）")
 
-    search_url = (
-        f"https://www.zhipin.com/web/geek/job?query={target_job}实习&city={city_code}"
-    )
-    print(f"📋 打开搜索页：{search_url}")
-    page = page.new_tab(search_url)
-    time.sleep(6)
+    def stop_blocked(reason, entry, evidence):
+        nonlocal stop_reason
+        stop_reason = reason
+        entry.update(status="blocked", reason=reason)
+        now = datetime.now().astimezone()
+        try:
+            cooldown_file.parent.mkdir(parents=True, exist_ok=True)
+            cooldown_file.write_text(json.dumps({
+                "until": (now + timedelta(hours=2)).isoformat(), "reason": reason,
+                "page_url": evidence.get("page_url") or page.url,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            print("⚠️  冷却文件写入失败，本次仍立即终止。")
+        record(log, log_file, "failed", {
+            **entry, "status": "blocked", "reason": reason,
+            "evidence": evidence, "ts": datetime.now().astimezone().isoformat(),
+        })
+        print(f"\n🛑🛑 检测到风控，立即终止整个脚本：{reason}\n")
+        raise SystemExit(1)
 
-    if "login" in page.url or "user/?ka" in page.url:
-        print("⚠️  请先在浏览器登录后按 Enter...")
-        input()
-        page.get(search_url)
-        time.sleep(4)
+    def check_page(entry):
+        reason = page_block_reason(page)
+        if reason:
+            stop_blocked(reason, entry, {"packets": [], "page_url": page.url, "page_blocked": reason})
 
-    print(f"🎯 开始投递，目标 {target_count} 份\n")
+    def rest_after_view(entry):
+        check_page(entry)  # 风控时立即退出，不等待休息。
+        delay = random.uniform(*(FAST_VIEW_INTERVAL if args.fast else VIEW_INTERVAL))
+        print(f"  👀 详情读取后休息 {delay:.1f} 秒（本轮 {view_count}/{args.max_views}）")
+        time.sleep(delay)
+        check_page(entry)
+        if view_count % VIEW_REST_EVERY == 0:
+            delay = random.uniform(*(FAST_VIEW_REST if args.fast else VIEW_REST))
+            print(f"  ☕ 每浏览 {VIEW_REST_EVERY} 份额外休息 {delay:.1f} 秒")
+            time.sleep(delay)
+            check_page(entry)
 
-    page_num = 1
-    while applied_count < target_count:
-        print(f"── 第 {page_num} 页 ──────────────────────")
-        time.sleep(3)
-
-        cards = page.eles(".job-card-wrap")
-        if not cards:
-            print("未找到卡片，停止")
-            break
-
-        # 过滤已处理，只存 title（不缓存元素引用）
-        pending_titles = []
-        for c in cards:
-            t = c.ele(".job-name")
-            if t and t.text and t.text not in seen_titles:
-                pending_titles.append(t.text)
-
-        print(f"待处理: {len(pending_titles)} 个")
-        if not pending_titles:
-            break
-
-        for title in pending_titles:
-            if applied_count >= target_count:
-                break
-            seen_titles.add(title)
-
-            # 实时查找公司/薪资（不缓存引用）
-            company = (
-                page.run_js(f"""
-                var cards = document.querySelectorAll(".job-card-wrap");
-                for (var c of cards) {{
-                    var n = c.querySelector(".job-name");
-                    if (n && n.textContent.trim() === {json.dumps(title)}) {{
-                        var co = c.querySelector(".company-name");
-                        return co ? co.textContent.trim() : "";
-                    }}
-                }}
-                return "";
-            """)
-                or ""
-            )
-            salary = (
-                page.run_js(f"""
-                var cards = document.querySelectorAll(".job-card-wrap");
-                for (var c of cards) {{
-                    var n = c.querySelector(".job-name");
-                    if (n && n.textContent.trim() === {json.dumps(title)}) {{
-                        var s = c.querySelector(".job-salary");
-                        return s ? s.textContent.trim() : "";
-                    }}
-                }}
-                return "";
-            """)
-                or ""
-            )
-
-            # 公司黑名单 / 跨运行去重 → 点击前先拦掉，省一次 JD 加载
-            key = dedup_key(company, title)
-            if is_blacklisted(company, cfg):
-                skipped_count += 1
-                record(
-                    log,
-                    log_file,
-                    "skipped",
-                    {"company": company, "job": title, "reason": "公司黑名单"},
-                )
-                print(f"[黑名单] {company} | {title}")
-                continue
-            if key and key in applied_index:
-                skipped_count += 1
-                record(
-                    log,
-                    log_file,
-                    "skipped",
-                    {
-                        "company": company,
-                        "job": title,
-                        "reason": "已投过（跨运行去重）",
-                    },
-                )
-                print(f"[已投] {company} | {title}")
-                continue
-
+    try:
+        jev_key, resume_text, profile = "", "", ""
+        if args.matcher in ("jev", "llm"):
+            if args.matcher == "llm":
+                settings = {**llm_match.DEFAULT_SETTINGS,
+                            **(cfg["llm"] if isinstance(cfg.get("llm"), dict) else {})}
+                jev_key = llm_match.load_llm_key(settings)
+                if not jev_key or not llm_match.settings_ready(settings):
+                    stop_reason = "LLM 缺少 base_url/model 或密钥"
+                    print("🛑 LLM 配置不完整：请运行 python3 config_tool.py check；未启动浏览器，不会降级。")
+                    raise SystemExit(2)
+            else:
+                jev_key = load_jev_key()
+                if not jev_key:
+                    stop_reason = "缺少 JEV_API_KEY"
+                    print("🛑🛑 Jev 模式缺少 JEV_API_KEY：请运行 python3 config_tool.py check；未启动浏览器，不会降级。")
+                    raise SystemExit(2)
             try:
-                # page级JS按岗位名定位并点击卡片
-                page.run_js(f"""
-                    var cards = document.querySelectorAll(".job-card-wrap");
-                    for (var c of cards) {{
-                        var n = c.querySelector(".job-name");
-                        if (n && n.textContent.trim() === {json.dumps(title)}) {{
-                            c.click(); break;
-                        }}
-                    }}
-                """)
-                time.sleep(3)
+                resume_path = Path(cfg["resume_path"]).expanduser()
+                if not resume_path.is_absolute():
+                    resume_path = Path(__file__).parent / resume_path
+                resume_text = resume_path.read_text(encoding="utf-8")
+                if not resume_text.strip():
+                    raise ValueError("空简历")
+            except (OSError, UnicodeError, ValueError):
+                stop_reason = "简历不可读或为空"
+                print("🛑 请将 config.resume_path 指向非空 UTF-8 文本简历（.md / .txt；PDF 请先转文本）。")
+                raise SystemExit(2)
+            resume_text = redact_resume(resume_text, cfg["resume_redact"])
+            profile = redact_resume(cfg["job_profile"], cfg["resume_redact"])
 
-                desc_el = page.ele(".job-detail-body") or page.ele(".job-sec-text")
-                desc = desc_el.text if desc_el else ""
+        print(f"🎯 Boss直聘 | 岗位: {args.job} | 城市: {args.city} | 目标: {target_count} 份 | 匹配: {args.matcher}")
+        if args.dry_run:
+            print("🧪 dry-run：只浏览和打分，--count 为评分数量上限")
+        if args.fast:
+            print("⚠️  --fast 调试模式：详情间隔 1–3 秒，沟通间隔及额外休息 3–6 秒")
+        print("🔗 连接 Chrome（端口 9222）...")
+        browser = connect_chrome()
 
-                score, reason = score_jd(title, desc, cfg)
-                print(f"[{score:3d}分] {company} | {title} | {salary} → {reason}")
+        search_url = build_search_url(args.job, city_code, args.job_type, args.experience, args.degree)
+        print(f"📋 打开搜索页：{search_url}")
+        page = pick_boss_tab(browser.get_tabs())
+        if page is None:
+            page = browser.new_tab(search_url)
+        else:
+            page.get(search_url)
+        browse_sleep(6)
+        check_page({"platform": "boss"})
 
-                if score >= args.min_score:
-                    # 检查是否已达今日沟通上限
+        if "login" in page.url or "user/?ka" in page.url:
+            print("⚠️  请先在浏览器登录后按 Enter...")
+            input()
+            page.get(search_url)
+            browse_sleep(4)
+
+        print(f"🎯 开始{'试跑' if args.dry_run else '投递'}，目标 {target_count} 份\n")
+        page_num = 1
+        while (dry_run_count if args.dry_run else applied_count) < target_count:
+            print(f"── 第 {page_num} 页 ──────────────────────")
+            browse_sleep(3)
+            check_page({"platform": "boss"})
+            cards = page.run_js(CARD_SNAPSHOT_JS, BOSS_JOB_ID_PATTERN) or []
+            if not cards:
+                print("未找到卡片，停止")
+                break
+
+            # 无 ID 卡片用 无ID:公司|标题 占位，避免无限滚动时每页重复记 skipped
+            pending_cards = [c for c in cards if (c["job_id"] or f"无ID:{c['company']}|{c['title']}") not in seen_job_ids]
+            print(f"待处理: {len(pending_cards)} 个")
+            for card in pending_cards:
+                if view_count >= args.max_views:
+                    stop_reason = f"已达 --max-views 上限（{args.max_views}），停止扫描"
+                    break
+                # --fill-queue 保留 Jev 投满后评完当前批次的旧行为。
+                if ((args.dry_run and dry_run_count >= target_count)
+                        or (not args.dry_run and applied_count >= target_count
+                            and (not args.fill_queue or args.matcher == "keyword"))):
+                    break
+                job_id, title = card["job_id"], card["title"]
+                company, salary = card["company"], card["salary"]
+                entry = {"platform": "boss", "job_id": job_id, "company": company,
+                         "job": title, "salary": salary,
+                         "url": f"https://www.zhipin.com/job_detail/{job_id}.html" if job_id else ""}
+                seen_key = job_id or f"无ID:{company}|{title}"
+                if seen_key in seen_job_ids:
+                    continue
+                seen_job_ids.add(seen_key)
+                rows.append(entry)
+                key = dedup_key(company, title)
+                boss_key = f"boss:{job_id}"
+
+                skip_reason = ""
+                if not job_id:
+                    skip_reason = "无职位ID"
+                elif is_blacklisted(company, cfg):
+                    skip_reason = "公司黑名单"
+                elif boss_key in applied_index or (key and key in applied_index):
+                    skip_reason = "已投过或待核验（跨运行去重）"
+                elif args.matcher in ("jev", "llm"):
+                    for kw in cfg["exclude_keywords"]:
+                        if kw and kw.lower() in title.lower():
+                            skip_reason = f"标题包含排除词: {kw}"
+                            break
+                if skip_reason:
+                    skipped_count += 1
+                    entry.update(decision="skip", reason=skip_reason)
+                    record(log, log_file, "skipped", {**entry, "reason": skip_reason})
+                    print(f"⏭️  [{skip_reason}] {company} | {title} | ID={job_id}")
+                    continue
+
+                try:
+                    cache_id = backend_cache_id(job_id)
+                    if args.matcher in ("jev", "llm"):
+                        cached = None if args.refresh else latest_match(cache_id, cache_file)
+                        if cached and cached["decision"]["decision"] in ("skip", "review"):
+                            decision = cached["decision"]
+                            entry.update(jev=cached, decision=decision["decision"],
+                                         reason=f"[缓存] {decision['reason']}")
+                            if entry["decision"] == "skip":
+                                skipped_count += 1
+                            if args.dry_run:
+                                dry_run_count += 1
+                            record(log, log_file, "skipped" if entry["decision"] == "skip" else "review", {**entry})
+                            print(f"[{entry['decision']}] {company} | {title} → {entry['reason']}")
+                            continue
+                        title_state = (f"【岗位卡片】{title}｜{company}｜{salary}｜标签: {card.get('tags', [])}\n"
+                                       f"【求职偏好】{profile}")
+                        title_skip = False
+                        try:
+                            if not title_protected(title):
+                                title_skip, title_reason = match_title(
+                                    cache_id, title_state, jev_key, cache_file, refresh=args.refresh)
+                        except JevError:
+                            title_skip = False
+                            print(f"  标题粗筛失败，继续读取 JD：{company} | {title}")
+                        if title_skip:
+                            skipped_count += 1
+                            if args.dry_run:
+                                dry_run_count += 1
+                            entry.update(decision="skip", reason=title_reason)
+                            record(log, log_file, "skipped", {**entry})
+                            print(f"⏭️  [{title_reason}] {company} | {title}")
+                            continue
+                    check_page(entry)
+                    # 按 href 中的完整职位 ID 实时定位卡片，绝不按同名标题匹配。
+                    link = page.ele(
+                        f'css:.job-card-wrap a[href*="job_detail/{job_id}.html"]', timeout=2
+                    )
+                    if not link:
+                        raise RuntimeError(f"未找到职位卡片: {job_id}")
+                    # JS 点击不会切换右侧详情，必须原生点击 .job-card-box
+                    box = link.parent("css:.job-card-wrap").ele("css:.job-card-box")
+                    view_count += 1
+                    try:
+                        box.click()
+                        browse_sleep(2)
+                        check_page(entry)
+                        # 详情标题必须对上当前卡片，否则后面的"立即沟通"会发给别的岗位
+                        if not wait_detail_title(page, title):
+                            skipped_count += 1
+                            entry.update(decision="skip", reason="详情未切换到该岗位")
+                            record(log, log_file, "skipped", {**entry, "reason": "详情未切换到该岗位"})
+                            print(f"⏭️  [详情未切换] {company} | {title}")
+                            continue
+                        desc_el = page.ele(".job-detail-body") or page.ele(".job-sec-text")
+                        if not desc_el:
+                            raise RuntimeError("未找到岗位 JD，未发起沟通")
+                        jd_text = clean_jd(desc_el.text)
+                    finally:
+                        if entry.get("status") != "blocked":
+                            rest_after_view(entry)
+                    if args.dry_run:
+                        dry_run_count += 1
+                        entry["keyword_score"] = score_jd(title, jd_text, cfg)[0]
+                    if args.matcher in ("jev", "llm"):
+                        try:
+                            result = match_job(cache_id, jd_text,
+                                               build_state(title, company, jd_text, resume_text, profile),
+                                               jev_key, cache_file, refresh=args.refresh)
+                        except JevError:
+                            consecutive_jev_failures += 1
+                            entry.update(decision="review", reason="Jev 调用失败",
+                                         jev={"error": "Jev 调用失败"})
+                            record(log, log_file, "review", {**entry})
+                            print(f"[review] hard=— fit=— action=复核 p=— | {company} | {title} → Jev 调用失败")
+                            if consecutive_jev_failures >= MAX_CONSECUTIVE_FAILURES:
+                                stop_reason = "Jev 连续调用失败 3 次"
+                                print(f"🛑 {stop_reason}，停止脚本。")
+                                raise SystemExit(1)
+                            continue
+                        consecutive_jev_failures = 0
+                        decision = effective_decision(result, args.match_policy)
+                        entry.update(jev=result, decision=decision["decision"], reason=decision["reason"])
+                        metrics = format_result(decision)
+                        print(f"[{decision['decision']}] {metrics} | {company} | {title} → {decision['reason']}")
+                        if entry["decision"] == "review":
+                            record(log, log_file, "review", {**entry})
+                            continue
+                        if entry["decision"] == "skip":
+                            skipped_count += 1
+                            entry["reason"] = f"{decision['reason']}（{metrics}）"
+                            record(log, log_file, "skipped", {**entry})
+                            continue
+                    else:
+                        score, reason = score_jd(title, jd_text, cfg)
+                        entry.update(score=score, decision="apply" if score >= args.min_score else "skip",
+                                     reason=reason)
+                        print(f"[{score:3d}分] {company} | {title} | {salary} | ID={job_id} → {reason}")
+                        # keyword dry-run 保持 P0：评分不写 skipped。
+                        if not args.dry_run and score < args.min_score:
+                            skipped_count += 1
+                            record(log, log_file, "skipped", {**entry, "reason": reason})
+                            continue
+
+                    if args.dry_run or applied_count >= target_count:
+                        if entry["decision"] == "apply":
+                            entry["reason"] += "；dry-run 未沟通" if args.dry_run else "；已达 count 上限，未沟通"
+                        continue
+
                     btn_disabled = page.run_js(
                         'var b=document.querySelector(".op-btn-chat"); return b ? b.classList.contains("is-disabled") : false;'
                     )
                     if btn_disabled:
                         skipped_count += 1
-                        record(
-                            log,
-                            log_file,
-                            "skipped",
-                            {
-                                "company": company,
-                                "job": title,
-                                "score": score,
-                                "reason": "已沟通过",
-                            },
-                        )
+                        entry.update(status="already_contacted", reason="已沟通过")
+                        record(log, log_file, "skipped", {**entry, "reason": "已沟通过"})
                         continue
 
-                    # page级JS点击"立即沟通"
-                    page.run_js(
-                        'var b=document.querySelector(".op-btn-chat"); if(b) b.click();'
-                    )
-                    time.sleep(3)
+                    status, reason, evidence, clicked = start_chat(page, job_id)
+                    entry.update(status=status, reason=reason, attempted=clicked)
+                    if status == "blocked":
+                        stop_blocked(reason, entry, evidence)
+                    bucket = {"chat_started": "applied", "pending": "pending", "failed": "failed"}[status]
+                    record(log, log_file, bucket, {
+                        **entry, "status": status, "reason": reason, "evidence": evidence,
+                        "ts": datetime.now().astimezone().isoformat(),
+                    })
+                    if status in ("chat_started", "pending"):
+                        applied_index.add(boss_key)
+                        if key:
+                            applied_index.add(key)
+                    if status == "chat_started":
+                        applied_count += 1
+                        print(f"  ✅ 接口确认已沟通 ({applied_count}/{target_count})")
+                    elif status == "pending":
+                        pending_count += 1
+                        print(f"  ⏳ 待核验，不重试、不计成功：{reason}")
+                    else:
+                        print(f"  ❌ 沟通失败：{reason}")
 
-                    time.sleep(2)
-                    # 强制导回搜索页，不依赖弹窗行为
-                    page.get(search_url)
-                    time.sleep(4)
+                    if applied_count >= target_count and (not args.fill_queue or args.matcher == "keyword"):
+                        stop_reason = f"已达 --count 上限（{target_count}），停止扫描"
+                        break
+                    if clicked:
+                        delay = random.uniform(*(FAST_INTERVAL if args.fast else CHAT_INTERVAL))
+                        print(f"  ⏸️  沟通后休息 {delay:.1f} 秒")
+                        time.sleep(delay)
+                        check_page(entry)
+                        if status == "chat_started" and applied_count % SUCCESS_REST_EVERY == 0:
+                            delay = random.uniform(*(FAST_INTERVAL if args.fast else SUCCESS_REST))
+                            print(f"  ☕ 每成功 {SUCCESS_REST_EVERY} 份额外休息 {delay:.1f} 秒")
+                            time.sleep(delay)
+                            check_page(entry)
+                    # 仅离开列表页时返回，避免每次沟通都清空无限滚动的位置。
+                    if "/web/geek/job" not in page.url:
+                        page.get(search_url)
+                        browse_sleep(4)
 
-                    applied_count += 1
-                    if key:
-                        applied_index.add(key)
-                    record(
-                        log,
-                        log_file,
-                        "applied",
-                        {
-                            "company": company,
-                            "job": title,
-                            "salary": salary,
-                            "score": score,
-                        },
-                    )
-                    print(f"  ✅ 已投递 ({applied_count}/{target_count})")
-                    time.sleep(2)
-                else:
-                    skipped_count += 1
-                    record(
-                        log,
-                        log_file,
-                        "skipped",
-                        {
-                            "company": company,
-                            "job": title,
-                            "score": score,
-                            "reason": reason,
-                        },
-                    )
+                except Exception as e:
+                    # SystemExit 不会落到这里，风控不能被普通失败处理吞掉。
+                    check_page(entry)
+                    err = str(e)[:120]
+                    print(f"  ❌ 失败: {err}")
+                    record(log, log_file, "failed", {**entry, "error": err})
+                    browse_sleep(2)
 
-            except Exception as e:
-                err = str(e)[:120]
-                print(f"  ❌ 失败: {err}")
-                record(log, log_file, "failed", {"job": title, "error": err})
-                time.sleep(2)
-
-        # 滚动到底部触发无限加载
-        if applied_count < target_count:
+            if view_count >= args.max_views:
+                stop_reason = stop_reason or f"已达 --max-views 上限（{args.max_views}），停止扫描"
+                break
+            if (dry_run_count if args.dry_run else applied_count) >= target_count:
+                break
+            # 已见卡片仍须继续滚动，不能因本屏全部去重而漏掉后续岗位。
             prev_count = len(page.eles(".job-card-wrap"))
             page.run_js("window.scrollTo(0, document.body.scrollHeight)")
-            time.sleep(3)
+            browse_sleep(3)
+            check_page({"platform": "boss"})
             new_count = len(page.eles(".job-card-wrap"))
             if new_count <= prev_count:
                 print("没有加载到新岗位，停止")
                 break
             print(f"加载更多：{prev_count} → {new_count} 个")
             page_num += 1
-        else:
-            break
 
-    print_summary("Boss直聘", applied_count, skipped_count, log_file)
+    finally:
+        summary()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,18 @@
 {
+  "city": "深圳",
+  "matcher": "jev",
+  "llm": {
+    "base_url": "",
+    "model": "",
+    "api_key_env": "JOBHUNTER_LLM_KEY"
+  },
+  "jev_direction": "产品/AI产品方向实习",
+  "jev_title_unrelated": "销售、剪辑、设计、编剧、标注、教练、客服、纯技术研发",
+  "jev_stage_question": "岗位是否接受在校生实习或2027届应届生？若JD明确为社招全职或要求工作年限，则为否；未说明时按岗位标题判断。",
+  "jev_fit_unrelated": "不相关或非产品岗（如销售、剪辑、纯运营）",
   "resume_path": "./resume.md",
+  "job_profile": "2027届本科在读，XX专业，求 XX 方向实习，城市 XX，每周 X 天、X 个月起",
+  "resume_redact": ["张三"],
   "greeting": "您好，我对贵司岗位非常感兴趣，期待进一步沟通！",
   "skills": ["Python", "React", "项目管理", "数据分析"],
   "target_roles": ["产品经理", "前端工程师"],
