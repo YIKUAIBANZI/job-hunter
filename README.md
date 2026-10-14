@@ -1,12 +1,24 @@
 # Job Hunter — AI 辅助求职
 
-用本地 Chrome 读取招聘岗位，按简历和偏好筛选，再通过浏览器点击提交并核验。支持 BOSS、猎聘、51job、鱼泡；不会重放平台内部接口，不处理或绕过验证码。
+用本地 Chrome 读取招聘岗位，按简历和偏好筛选，再通过浏览器点击提交并核验。支持 BOSS、猎聘、应届生求职网、51job、鱼泡；不会重放平台内部接口，不处理或绕过验证码。
 
 ## 当前能力与边界
 
 BOSS 保留现有已实测流程。猎聘、51job、鱼泡已接入共同运行器，**仍处于上线校准阶段，不能把离线测试或只读浏览当成投递成功**。逐平台证据见 [验证记录](evidence/platform-validation-2026-10-14.md)。
 
-三个新平台默认 `--matcher jev`，也支持完全本地的 `--matcher keyword`。`--dry-run` 实际阻止所有投递和聊天动作。关键词模式只是回退/对照，可能把销售、研发岗位判高分，也可能因正文出现“资深”误杀实习岗位。
+共同运行器的四个平台默认 `--matcher jev`，也支持完全本地的 `--matcher keyword`。`--dry-run` 实际阻止所有投递和聊天动作。关键词模式只是回退/对照，可能把销售、研发岗位判高分，也可能因正文出现“资深”误杀实习岗位。
+
+| 平台 | 入口 | 校准状态 |
+|---|---|---|
+| BOSS | `boss_apply.py` | 保留已实测流程 |
+| 猎聘 | `liepin_apply.py` | 已校准 |
+| 应届生求职网 `yingjiesheng` | `yingjiesheng_apply.py` | 未校准，需维护者首单实测 |
+| 51job | `51job_apply.py` | 未校准 |
+| 鱼泡 | `yupao_apply.py` | 未校准 |
+
+应届生本阶段仅离线实现。搜索与详情数据只监听页面自身请求，详情在自建标签直接导航并于结束关闭；投递仍须 ID + 标题一致、状态允许、原生点击“立即申请”。卡片已申请、转载或过期直接跳过；志愿替换、企业补充信息及简历不完整进入人工复核，均不调 Jev。详情状态检查先于 Jev 标题粗筛与匹配缓存。可见 `.delivery-tip` 记录其文字并复核；点击后出现 `.el-dialog` 保留 pending 并停止，不点击任何弹窗按钮。
+
+应届生暂不支持 `--job-type/--experience/--degree`，非空参数直接报错，请用关键词 + Jev 硬条件。慢节奏与 51job 相同：详情间隔 15–30 秒，每 5 个休息 90–180 秒，默认 `--max-views 20`。日志、冷却与缓存分别为 `yingjiesheng-<城市>-log.json`、`yingjiesheng-cooldown.json`、`jev-yingjiesheng-cache.json`，均由现有忽略规则覆盖。
 
 共同流程包含：
 
@@ -48,9 +60,9 @@ python3 daily.py --plan daily.json     # 也可指定其他计划路径
 python3 daily.py --live                # 仅在已授权的平台与配额范围内真投
 ```
 
-计划必须包含 `city`、四个平台的 `quota/keywords/args`，以及 `greet/inbox/review_list` 三个布尔值。关键词按完整字符串校验，不做包含匹配、不自动扩词，零配额平台也校验；越界或缺字段在启动任何子进程前报错。当前示例使用 `AI产品`、`产品实习`；若你使用 `config.example.json` 的白名单，须调整计划。`AI产品经理` 与 `AI产品实习` 不因包含 `AI产品` 而被允许。
+计划必须包含 `city`、五个平台的 `quota/keywords/args`，以及 `greet/inbox/review_list` 三个布尔值。关键词按完整字符串校验，不做包含匹配、不自动扩词，零配额平台也校验；越界或缺字段在启动任何子进程前报错。当前示例使用 `AI产品`、`产品实习`，应届生配额为 0、关键词为 `产品经理`；必须先将计划关键词与 `config.target_roles` 白名单对齐。旧四平台计划需要补齐 `yingjiesheng`。`AI产品经理` 与 `AI产品实习` 不因包含 `AI产品` 而被允许。
 
-按 BOSS → 猎聘 → 51job → 鱼泡顺序运行；`quota=0` 跳过并在日报注明。每次搜索的 `--count` 是平台剩余额度：真投按分类内新增的唯一 applied ID 扣减，试跑按入口输出的评估数量扣减（无统计时按传入额度扣减）。额度用完停止；新增 pending 也停止该平台剩余关键词，留待人工核验。试跑仍会读取真实浏览器，默认 Jev 仍会外发脱敏材料并计费；`args` 可用 `--matcher keyword` 做本地匹配。
+按 BOSS → 猎聘 → 应届生 → 51job → 鱼泡顺序运行；`quota=0` 跳过并在日报注明。每次搜索的 `--count` 是平台剩余额度：真投按分类内新增的唯一 applied ID 扣减，试跑按入口输出的评估数量扣减（无统计时按传入额度扣减）。额度用完停止；新增 pending 也停止该平台剩余关键词，留待人工核验。试跑仍会读取真实浏览器，默认 Jev 仍会外发脱敏材料并计费；`args` 可用 `--matcher keyword` 做本地匹配。
 
 `args` 只接受筛选、匹配和扫描上限参数：`--job-type/--experience/--degree/--matcher/--min-score/--max-views/--max-pages/--match-policy review-gate/--refresh`（平台是否支持仍由其入口判断）。禁止覆盖关键词、城市、配额、运行模式；`--fast`、`--ignore-cooldown`、`--match-policy boss-b`、`--calibrate` 等在计划校验时直接拒绝。
 
@@ -117,7 +129,7 @@ Jev 将**脱敏简历、求职偏好、职位标题/公司和完整 JD**发送�
 
 **新平台默认额外采用 `--match-policy review-gate`：Jev 建议复核时不自动投递。** 原始 Jev 结果与最终处理结论分开保存。`--match-policy boss-b` 可用于与交接方案 B 对照；BOSS 的阈值本次未改。
 
-新平台缓存按平台、简历/偏好/问题/阈值版本摘要隔离，更新材料自动失效；`--refresh` 强制重评。命中 7 天缓存的复核/跳过不再打开详情；真实提交前仍需读取当前详情、核对身份并重新检查 JD。缓存不写简历和 JD 原文。
+新平台缓存按平台、简历/偏好/问题/阈值版本摘要隔离，更新材料自动失效；`--refresh` 强制重评。猎聘/51job/鱼泡命中 7 天缓存的复核/跳过不再打开详情；应届生每次先读取当前详情状态，再使用匹配缓存。真实提交前仍需读取当前详情、核对身份并重新检查 JD。缓存不写简历和 JD 原文。
 
 ## 人工复核与批准投递
 
@@ -137,6 +149,8 @@ python3 boss_apply.py --approved --city 深圳 --count 1
 python3 liepin_apply.py --approved --city 深圳 --count 1
 # 鱼泡尚未校准，仍需锁定已勾选 ID，授权后只尝试一次
 python3 yupao_apply.py --approved --city 深圳 --calibrate --count 1 --job-id 已确认的数字职位ID
+# 应届生同样未校准，批准模式仍须首单门禁
+python3 yingjiesheng_apply.py --approved --city 深圳 --calibrate --count 1 --job-id 已确认的数字职位ID
 ```
 
 `--approved` 不需要 `--job`，只处理该平台、该城市日志中且在清单打勾的 ID；URL 和标题以日志为准，修改清单链接不会改变导航目标。不搜索列表、不读匹配缓存、不调用 Jev，也不需要 Jev key 或简历。传 `--dry-run` 可只核对批准详情而不点击。
@@ -147,12 +161,14 @@ BOSS 直接打开日志详情 URL，点击前复核 URL 中的 ID、`.job-banner
 
 ## 首单校准与结果
 
-已校准平台见 `platform_adapters.CALIBRATED`：猎聘已完成两次首单（`open-chat` 返回 `flag=1` + 按钮变“继续聊”）；51job、鱼泡尚未校准（鱼泡 1 次仅页面证据），普通真实批量运行会在连接浏览器前停止。**真实投递须先征得用户对该平台和岗位的明确授权**，随后仅运行一份：
+已校准平台见 `platform_adapters.CALIBRATED`：猎聘已完成两次首单（`open-chat` 返回 `flag=1` + 按钮变“继续聊”）；应届生、51job、鱼泡尚未校准（鱼泡 1 次仅页面证据），普通真实批量运行会在连接浏览器前停止。**真实投递须先征得用户对该平台和岗位的明确授权**，随后仅运行一份：
 
 ```bash
 # 仅在只读验证、登录、匹配结论及用户授权均完成后运行
 python3 liepin_apply.py --job "AI产品经理" --city 深圳 --experience 实习生 \
   --count 1 --max-views 5 --job-id 已确认的数字职位ID --calibrate
+python3 yingjiesheng_apply.py --job "产品经理" --city 深圳 \
+  --calibrate --job-id 已确认的数字职位ID --count 1
 ```
 
 `--calibrate` 最多尝试一次，不自动确认额外弹窗，不自动发送自定义招呼语、不自动切换另一种投递动作。需要额外确认、返回未知结果或页面断连时保留 `pending`。若按钮成功但接口尚未识别，只记录页面证据；维护者应人工核对本次请求的端点、职位字段与成功码后添加精确协议并补测试，不能仅因一次点击自动解锁批量。
@@ -165,7 +181,7 @@ python3 liepin_apply.py --job "AI产品经理" --city 深圳 --experience 实习
 - `<平台>-cooldown.json`：冷却截止时间。
 - `jev-<平台>-cache.json`：新平台缓存；BOSS 保留 `jev-cache.json`。
 
-网络证据只记录去查询参数的 URL、HTTP 状态、code、职位关联标志与风控分类，不写请求正文、密钥和原始响应消息。鱼泡页面域名为 `yupao.com`，业务证据同时收取 `yupaowang.com` 及其子域名；同域埋点不会因收取而成为成功证据，非证据域名仅记录 host/path。只 `applied` 计入成功；`pending` 需人工对照平台记录核验，不能直接删除后重跑。
+网络证据只记录去查询参数的 URL、HTTP 状态、code、职位关联标志与风控分类，不写请求正文、密钥和原始响应消息。应届生新增 `outer_status/nested_status` 短码；前端 JS 的 `/open/yjs/apply` 成功条件为二者均为 "1"，必须关联当前岗位。此条件待首单实测确认，应届生仍未加入 `CALIBRATED`。鱼泡页面域名为 `yupao.com`，业务证据同时收取 `yupaowang.com` 及其子域名；同域埋点不会因收取而成为成功证据，非证据域名仅记录 host/path。只 `applied` 计入成功；`pending` 需人工对照平台记录核验，不能直接删除后重跑。
 
 ## BOSS 现有入口
 
@@ -208,7 +224,7 @@ python3 inbox_report.py --city 深圳 --no-liepin
 - `apply_runtime.py`：节奏、风控、提交预记、监听和证据核验。
 - `review_list.py`：离线复核清单与批准 ID 解析。
 - `inbox_report.py`：只读回复日报，纯函数与页面读取分离。
-- 三个平台的 `*_apply.py`：保留城市表及 CLI 入口。
+- 共同运行器的四个平台 `*_apply.py`：保留城市表及 CLI 入口。
 - `official_apply.py`：原有官网入口补全工具，本次未改。
 
 ```bash

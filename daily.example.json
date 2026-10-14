@@ -3,6 +3,7 @@
   "platforms": {
     "boss": {"quota": 20, "keywords": ["AI产品", "产品实习"], "args": []},
     "liepin": {"quota": 8, "keywords": ["AI产品"], "args": ["--experience", "实习生", "--degree", "本科"]},
+    "yingjiesheng": {"quota": 0, "keywords": ["产品经理"], "args": []},
     "51job": {"quota": 0, "keywords": ["AI产品"], "args": ["--job-type", "全职", "--experience", "在校生/应届生"]},
     "yupao": {"quota": 0, "keywords": ["产品实习"], "args": []}
   },

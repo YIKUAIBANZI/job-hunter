@@ -9,7 +9,7 @@ from pathlib import Path
 
 from shared import load_applied_index
 
-PLATFORMS = ('boss', 'liepin', '51job', 'yupao')
+PLATFORMS = ('boss', 'liepin', 'yingjiesheng', '51job', 'yupao')
 REVIEW_FILE = '复核清单.md'
 
 
@@ -103,7 +103,7 @@ def load_review_rows(root, city=None):
     """只读取四个平台的岗位日志；去重索引始终覆盖所有城市。"""
     logs = {}
     for path in sorted(root.glob('*-log.json')):
-        match = re.fullmatch(r'(boss|liepin|51job|yupao)-(.+)-log\.json', path.name)
+        match = re.fullmatch(r'(boss|liepin|yingjiesheng|51job|yupao)-(.+)-log\.json', path.name)
         if not match or city is not None and match[2] != city:
             continue
         try:

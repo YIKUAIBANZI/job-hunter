@@ -1,6 +1,6 @@
 ---
 name: job-hunter
-description: 求职筛选与投递助手，支持 BOSS、猎聘、51job、鱼泡。先读取简历与偏好，只读核对岗位，再在授权范围内慢速投递并核验。
+description: 求职筛选与投递助手，支持 BOSS、猎聘、应届生求职网、51job、鱼泡。先读取简历与偏好，只读核对岗位，再在授权范围内慢速投递并核验。
 origin: local
 ---
 
@@ -20,11 +20,23 @@ origin: local
 
 1. 优先 `--dry-run --matcher keyword` 验证稳定 ID、卡片/详情标题、公司及 JD，无第三方模型调用。
 2. 已授权 Jev 后切换 `--matcher jev`，审阅推荐/复核/跳过。新平台默认 `review-gate`，Jev 建议复核不投；`boss-b` 仅在明确选择交接阈值时使用。
-3. 登录、数据边界和候选均已确认后，真实首单使用 `--calibrate --count 1 --job-id <已确认ID>`。三个新平台默认禁止未经校准的批量真投。
+3. 登录、数据边界和候选均已确认后，真实首单使用 `--calibrate --count 1 --job-id <已确认ID>`。未加入 `CALIBRATED` 的平台禁止未经校准的批量真投。
 4. 检查网络和页面证据：未知接口 code=0 无效，必须绑定当前岗位；页面证据必须是同一岗位点击后的明确成功变化。
 5. `pending` 不算成功，不重复提交；出现一条就停止。本次失败、风控或断连也必须完整报告，不用输出过滤隐藏停止原因。
 
 命令和已支持筛选见 README。不要套用 BOSS 的经验/学历代码；未知筛选不得静默忽略。
+
+| 平台 | 入口 | 首单状态 |
+|---|---|---|
+| BOSS | `boss_apply.py` | 已实测 |
+| 猎聘 | `liepin_apply.py` | 已校准 |
+| 应届生求职网 `yingjiesheng` | `yingjiesheng_apply.py` | 未校准，需首单实测 |
+| 51job | `51job_apply.py` | 未校准 |
+| 鱼泡 | `yupao_apply.py` | 未校准 |
+
+应届生本阶段仅离线实现。只监听页面搜索/详情请求，详情新建标签直接导航并清理；申请仍按 ID + 标题核验，仅原生点击可见“立即申请”。`--job-type/--experience/--degree` 非空直接报错，用关键词 + Jev 硬条件。卡片已申请/转载/过期在开详情前跳过，详情志愿状态与简历完整度先于 Jev 和缓存判断；需换志愿或补信息进复核，不调 Jev。可见 `.delivery-tip` 按文字复核，点击后任何 `.el-dialog` 保留 pending 并停止，绝不操作弹窗按钮。
+
+应届生支持 `--approved`，同样新建详情标签、读状态并核验身份，不调 Jev；未校准门禁不变，真实首单必须 `--calibrate --job-id <已确认ID> --count 1`。`VERIFIED_ENDPOINTS` 的 `/open/yjs/apply` 条件来自前端 JS：外层 status 与 resultbody.items[0].status 均为 1；证据仅新增 outer_status/nested_status 短码。维护者完成实测后才能加入 `CALIBRATED`。节奏同 51job，默认详情上限 20；日志/冷却/缓存前缀为 `yingjiesheng`、`yingjiesheng`、`jev-yingjiesheng`，现有忽略规则已覆盖。
 
 人工复核使用 `python3 review_list.py [--city 深圳]` 生成 `复核清单.md`。用户看过岗位并将批准列改为 `[x]` 后，BOSS/猎聘/鱼泡可用 `--approved --city 深圳 --count 1`；不需要 `--job`，不搜索、不读取 Jev key/简历、不调 Jev。只采用日志中同平台、同城市且已勾选的 ID 与详情 URL，清单编辑不替代岗位身份核验；重新生成保留仍在清单的勾选，已 applied/pending 自动移除。51job 行为 `—`，禁止批准投递，需人工页面处理。
 
@@ -39,7 +51,7 @@ origin: local
 
 批量日跑使用 `python3 daily.py [--plan daily.json]`，默认给投递入口加 `--dry-run`；只有已获得对应平台和配额授权时才加 `--live`。一次阻塞调用结束后读取退出码及 `日报.md`，无需轮询。先复制 `daily.example.json` 为本地 `daily.json`，确保所有关键词精确属于 `config.target_roles`，不自行扩词；缺字段、越界词和危险参数启动即拒绝。当前示例词为 `AI产品`、`产品实习`，不要把包含匹配当成白名单授权。
 
-日跑只用 subprocess 顺序调用 BOSS、猎聘、51job、鱼泡入口；零配额跳过，真投按新增唯一 applied ID 扣额度，试跑按评估数扣额度。每轮新增 pending 停止该平台剩余关键词。冷却、风控、未校准或异常停止该平台但继续下一平台；真投识别首单门禁文案，不传 `--calibrate`。绝不传 `--fast/--ignore-cooldown/--match-policy boss-b` 或允许计划覆盖城市、关键词、配额。平台间休息 60–180 秒，`--no-rest` 仅供测试/调试；单入口超时 90 分钟，不重试。
+日跑只用 subprocess 顺序调用 BOSS、猎聘、应届生、51job、鱼泡入口；旧计划需补齐 `yingjiesheng`，示例 quota=0、keywords=["产品经理"]，零配额也须校验 config.target_roles 白名单。零配额跳过，真投按新增唯一 applied ID 扣额度，试跑按评估数扣额度。每轮新增 pending 停止该平台剩余关键词。冷却、风控、未校准或异常停止该平台但继续下一平台；真投识别首单门禁文案，不传 `--calibrate`。绝不传 `--fast/--ignore-cooldown/--match-policy boss-b` 或允许计划覆盖城市、关键词、配额。平台间休息 60–180 秒，`--no-rest` 仅供测试/调试；单入口超时 90 分钟，不重试。
 
 完成平台后，计划 `greet=true` 且真投才运行 `boss_greet.py --send --count 10`；随后按计划生成复核清单和回复日报。日报列本次新增、需要人工核验的 pending、实际复核清单新增 ID、HR 已回复数及后处理错误；旧回复日报未更新时明确标记。退出码 1 表示平台风控，正常结束其余状态为 0，启动校验失败为 2；0 不代表全部配额完成。查看日报中的状态和 `runs/<日期>/` 日志，同日重跑会覆盖同名文件，需留证先另存。`daily.json`、`runs/`、`日报.md` 仅本地保留；当前日跑仅离线 mock 验证。
 

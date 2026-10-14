@@ -391,6 +391,406 @@ def test_only_liepin_calibrated_and_alias_scoped():
     assert adapters.CALIBRATED=={'liepin'}
 
 
+@pytest.mark.parametrize('url,expected', [
+    ('https://q.yingjiesheng.com/jobdetail/123.html', '123'),
+    ('https://q.yingjiesheng.com/jobdetail/123.html?jobid=123', '123'),
+    ('https://yingjiesheng.com/jobdetail/123.html', '123'),
+    ('https://young.yingjiesheng.com/pc/jobdetail?jobid=123', ''),
+    ('https://yingjiesheng.com.evil.test/jobdetail/123.html', ''),
+    ('https://evil.test/jobdetail/123.html', ''),
+    ('https://q.yingjiesheng.com/jobdetail/x.html', ''),
+])
+def test_yjs_job_ids(url, expected):
+    assert parse_job_id('yingjiesheng', url) == expected
+
+
+def test_yjs_search_url_and_cities():
+    import importlib
+    entry = importlib.import_module('yingjiesheng_apply')
+    old = importlib.import_module('51job_apply')
+    assert entry.CITY_CODES == old.CITY_CODES
+    url = build_search_url('yingjiesheng', '产品经理 / AI?#', '040000')
+    assert url == 'https://q.yingjiesheng.com/jobs/search/%E4%BA%A7%E5%93%81%E7%BB%8F%E7%90%86%20%2F%20AI%3F%23?jobarea=040000'
+
+
+def yjs_packet(body, url='https://youngapi.yingjiesheng.com/open/yjs/apply', job_id='123'):
+    return SimpleNamespace(url=url, request=SimpleNamespace(postData={'jobIDs': job_id}),
+                           response=SimpleNamespace(body=body, status=200))
+
+
+class YjsListener(Listener):
+    def start(self, *args, **kw):
+        self.events.append(('listen', args, kw))
+    def wait(self, **kw):
+        self.events.append(('wait', kw))
+        return super().wait(**kw)
+
+
+class YjsTab:
+    def __init__(self, events, packets=(), tab_id='detail', *, tip='', label='立即申请', dialog=False):
+        self.events, self.tab_id = events, tab_id
+        self.url = 'about:blank'
+        self.listen = YjsListener(events, packets)
+        self.tip, self.label, self.dialog = tip, label, dialog
+        self.page_element = None
+    def get(self, url):
+        self.events.append(('get', url))
+        self.url = url
+    def close(self): self.events.append(('close', self.tab_id))
+    def run_js(self, script, *args):
+        if '.search-list-pagination' in script:
+            assert args == ('2',)
+            assert "textContent.trim()===arguments[0]" in script
+            return self.page_element
+        if '.delivery-tip' in script:
+            assert 'getClientRects' in script and 'visibility' in script
+            return self.tip
+        if '.delivery-btn' in script:
+            assert 'getClientRects' in script and 'visibility' in script
+            return SimpleNamespace(text=self.label, attr=lambda name:None, click=Button(self.events).click)
+        if '.el-dialog' in script:
+            return '点击后出现弹窗，请人工处理' if self.dialog else ''
+        assert '.detail-title-left-top .job' in script and '.detail-content-common.jobinfo' in script
+        return {'title':'产品经理', 'jd':'产品需求 AI 实习', 'company':''}
+
+
+def yjs_adapter(tab, *, approved=False, existing=()):
+    browser = SimpleNamespace(get_tabs=lambda:list(existing), new_tab=lambda:tab)
+    return adapters.PlatformAdapter('yingjiesheng', browser,
+                                    SimpleNamespace(job='产品经理', approved=approved), '040000')
+
+
+def search_body(items):
+    return {'resultbody': {'searchData': {'joblist': {'items': items}}}}
+
+
+@pytest.mark.parametrize('existing', [False, True])
+def test_yjs_search_listens_before_navigation_and_parses_cards(existing):
+    events=[]
+    item=dict(jobid='123', jobname='产品经理', coname='公司A', providesalary='10K',
+              jobarea='深圳-南山区', workyear='应届生', degree='本科', jobterm='全职',
+              jobtag='校招,AI', isapply='1', isReprintJob='0', isExpire='1')
+    tab=YjsTab(events, [yjs_packet(json.dumps(search_body([item])))], tab_id='search')
+    tab.url=build_search_url('yingjiesheng','产品经理','040000')
+    adapter=yjs_adapter(tab, existing=[tab] if existing else [])
+    adapter.search()
+    assert events[0][0:2] == ('listen', (adapters.YJS_SEARCH_ENDPOINT,))
+    assert events[1][0]=='get' and events[2]==('wait', {'timeout':15, 'raise_err':False})
+    assert events[-1]=='stop'
+    assert adapter.cards()==[dict(job_id='123', title='产品经理', company='公司A', salary='10K',
+                                 tags='深圳-南山区 应届生 本科 全职 校招,AI',
+                                 href='https://q.yingjiesheng.com/jobdetail/123.html',
+                                 url='https://q.yingjiesheng.com/jobdetail/123.html',
+                                 already_applied=True, external=True)]
+
+
+@pytest.mark.parametrize('body', [None, {}, {'resultbody':None}, search_body(None),
+                                search_body({}), search_body([None]), 'broken'])
+def test_yjs_search_missing_or_malformed_packet_fails_closed(body):
+    events=[]
+    tab=YjsTab(events, [] if body is None else [yjs_packet(body)])
+    adapter=yjs_adapter(tab)
+    adapter.yjs_items=[{'jobid':'old'}]
+    with pytest.raises(adapters.AdapterError, match='应届生搜索接口未返回岗位数据'):
+        adapter.search()
+    assert events[-1]=='stop' and adapter.cards()==[]
+
+
+def test_yjs_next_page_native_click_and_missing_page():
+    events=[]
+    tab=YjsTab(events,[yjs_packet(search_body([{'jobid':'456'}]))])
+    tab.page_element=FilterElement(events,'page-click')
+    adapter=yjs_adapter(tab); adapter.search_tab=tab
+    assert adapter.next_page(2)
+    assert events[0][0]=='listen' and events[1]=='page-click' and events[-1]=='stop'
+    assert adapter.cards()[0]['job_id']=='456'
+    events.clear();tab.page_element=None
+    assert adapter.next_page(2) is False
+    assert len(events)==2 and events[-1]=='stop'
+
+
+@pytest.mark.parametrize('state,expected', [
+    ({'isReprintJob':'1'}, (False,'skip','转载岗位需去外站投递')),
+    ({'isapply':'1'}, (False,'skip','平台显示已申请')),
+    ({'isapply':'0'}, (True,'apply','')),
+    ({'isapply':0, 'isIncomplete':'0'}, (True,'apply','')),
+    ({'isapply':'unknown'}, (False,'review','岗位申请状态未知')),
+    ({}, (False,'review','岗位申请状态未知')),
+    (None, (False,'review','岗位申请状态未知')),
+    ({'jobjumptype':'2', 'isxyzapply':'0'}, (True,'apply','')),
+    ({'jobjumptype':'2', 'isxyzapply':'1'}, (False,'skip','已申请（志愿）')),
+    ({'jobjumptype':'2', 'isxyzapply':'3'}, (False,'skip','已申请（志愿）')),
+    ({'jobjumptype':'2', 'isxyzapply':'2'}, (False,'skip','已申请该公司其他职位且已被处理')),
+    ({'jobjumptype':'2', 'isxyzapply':'4'}, (False,'review','需替换志愿，请人工处理')),
+    ({'jobjumptype':'2', 'isxyzapply':'5'}, (False,'review','需补充企业要求的信息，请人工处理')),
+    ({'jobjumptype':'2'}, (False,'review','志愿状态未知')),
+    ({'jobjumptype':'2', 'isxyzapply':'9'}, (False,'review','志愿状态未知')),
+    ({'isapply':'0', 'isIncomplete':True}, (False,'review','简历不完整，请先完善')),
+    ({'jobjumptype':'2', 'isxyzapply':'0', 'isIncomplete':'1'}, (False,'review','简历不完整，请先完善')),
+])
+def test_yjs_apply_state_all_branches(state, expected):
+    assert adapters.yjs_apply_state(state)==expected
+
+
+@pytest.mark.parametrize('approved', [False,True])
+@pytest.mark.parametrize('state_id', ['123','999'])
+def test_yjs_detail_state_identity_and_owned_tab_cleanup(monkeypatch, approved, state_id):
+    events=[]
+    state={'jobid':state_id,'jobname':'产品经理','isapply':'0','jobjumptype':'0'}
+    tab=YjsTab(events,[yjs_packet({'resultbody':state})])
+    adapter=yjs_adapter(tab,approved=approved); adapter.check=lambda:('','')
+    ticks=iter(range(100));monkeypatch.setattr(adapters.time,'monotonic',lambda:next(ticks))
+    monkeypatch.setattr(adapters.time,'sleep',lambda s:None)
+    card={'job_id':'123','title':'产品经理','url':'https://q.yingjiesheng.com/jobdetail/123.html?jobid=123'}
+    detail=adapter.open_approved_detail(card) if approved else adapter.open_detail(card)
+    assert events[0][0:2]==('listen',(adapters.YJS_DETAIL_ENDPOINT,))
+    assert events[1][0]=='get' and events[2][0]=='wait' and events[3]=='stop'
+    assert detail['yjs_state']['jobid']==state_id
+    assert same_job(card,detail)==(state_id=='123')
+    assert detail['job_id']=='123' and detail['company']==''
+    assert adapter.action_tab is tab and adapter.owned_details=={'detail':tab}
+    adapter.close_detail()
+    assert events[-1]==('close','detail') and adapter.yjs_state is None
+
+
+@pytest.mark.parametrize('body', [None,{}, {'resultbody':[]}, 'broken'])
+def test_yjs_detail_missing_state_stops_listener_and_cleans_owned_tab(body):
+    events=[];tab=YjsTab(events,[] if body is None else [yjs_packet(body)])
+    adapter=yjs_adapter(tab)
+    with pytest.raises(adapters.AdapterError,match='应届生详情接口未返回岗位数据'):
+        adapter.open_detail({'job_id':'123','title':'产品经理'})
+    assert events[-1]=='stop'
+    adapter.close()
+    assert events[-1]==('close','detail')
+
+
+@pytest.mark.parametrize('flag', ['--job-type','--experience','--degree'])
+def test_yjs_filters_rejected_before_connection(flag, capsys):
+    with pytest.raises(SystemExit) as exc:
+        runner.main('yingjiesheng',{'深圳':'040000'},['--job','产品经理',flag,'本科'])
+    assert exc.value.code==2 and '关键词 + Jev 硬条件' in capsys.readouterr().err
+    adapter=adapters.PlatformAdapter('yingjiesheng',None,SimpleNamespace(**{flag[2:].replace('-','_'):'本科'}),'040000')
+    with pytest.raises(adapters.AdapterError,match='关键词.*Jev 硬条件'):adapter.apply_filters()
+
+
+@pytest.mark.parametrize('platform', ['liepin','yingjiesheng','51job','yupao'])
+@pytest.mark.parametrize('flag,reason', [('already_applied','平台显示已申请'),('external','转载或已过期岗位')])
+@pytest.mark.parametrize('dry_run', [False,True])
+def test_card_platform_state_skips_before_detail_and_jev(tmp_path,monkeypatch,platform,flag,reason,dry_run):
+    cfg=config(tmp_path);cfg['resume_path']='resume.txt';(tmp_path/'resume.txt').write_text('测试简历')
+    monkeypatch.setattr(runner.jev,'load_jev_key',lambda:'test-key')
+    for name in ('match_title','match_job','latest_match'):
+        monkeypatch.setattr(runner.jev,name,lambda *a,**kw:pytest.fail('卡片不可投不得调 Jev/缓存'))
+    monkeypatch.setattr(runner,'submit',lambda *a,**kw:pytest.fail('卡片不可投不得提交'))
+    adapter=FakeAdapter([dict(job_id='123', title='产品经理', company='公司A', **{flag:True})])
+    parsed=runner.parse_args({'深圳':'040000'},['--job','产品经理',*(['--dry-run'] if dry_run else [])],platform=platform)
+    stats=runner.execute(platform,parsed,cfg,adapter,tmp_path,rest=lambda *a:None)
+    assert stats['skip']==1 and not adapter.opened
+    assert load_log(tmp_path/f'{platform}-深圳-log.json')['skipped'][0]['reason']==reason
+
+
+@pytest.mark.parametrize('state', [
+    {'isapply':'1'}, {'isReprintJob':'1'}, {'jobjumptype':'2','isxyzapply':'1'},
+    {'jobjumptype':'2','isxyzapply':'2'}, {'jobjumptype':'2','isxyzapply':'3'},
+    {'jobjumptype':'2','isxyzapply':'4'}, {'jobjumptype':'2','isxyzapply':'5'},
+    {'jobjumptype':'2'}, {'isapply':'0','isIncomplete':True}, {},
+])
+@pytest.mark.parametrize('dry_run', [False,True])
+def test_yjs_runner_state_gate_precedes_all_jev(tmp_path,monkeypatch,state,dry_run):
+    cfg=config(tmp_path);cfg['resume_path']='resume.txt';(tmp_path/'resume.txt').write_text('测试简历')
+    monkeypatch.setattr(runner.jev,'load_jev_key',lambda:'test-key')
+    # 标题初筛在详情前（与其他平台一致）；状态不可投时不得调完整 Jev
+    monkeypatch.setattr(runner.jev,'title_protected',lambda title:False)
+    monkeypatch.setattr(runner.jev,'match_title',lambda *a,**kw:(False,''))
+    monkeypatch.setattr(runner.jev,'latest_match',lambda *a,**kw:None)
+    monkeypatch.setattr(runner.jev,'match_job',lambda *a,**kw:pytest.fail('不可投不得调 Jev'))
+    monkeypatch.setattr(runner,'submit',lambda *a,**kw:pytest.fail('状态不许可不得提交'))
+    adapter=FakeAdapter([dict(job_id='123',title='产品经理',company='公司A')])
+    original=adapter.open_detail
+    adapter.open_detail=lambda c:{**original(c),'yjs_state':{'jobid':'123',**state}}
+    flags=['--dry-run'] if dry_run else ['--calibrate','--job-id','123','--count','1']
+    parsed=runner.parse_args({'深圳':'040000'},['--job','产品经理',*flags],platform='yingjiesheng')
+    stats=runner.execute('yingjiesheng',parsed,cfg,adapter,tmp_path,rest=lambda *a:None)
+    ok,name,reason=adapters.yjs_apply_state(state)
+    assert not ok and stats[name]==1 and adapter.opened==['123']
+    bucket='review' if name=='review' else 'skipped'
+    assert load_log(tmp_path/'yingjiesheng-深圳-log.json')[bucket][0]['reason']==reason
+
+
+@pytest.mark.parametrize('outer,nested,expected', [
+    ('1','1','applied'),(1,1,'applied'),('1','-102','failed'),
+    ('1','-100','failed'),('1','-101','failed'),('1','0','failed'),
+    ('600302','1','failed'),('600402','1','failed'),('600403','1','failed'),
+    ('600404','1','failed'),('600406','1','failed'),('600410','1','failed'),
+    (None,'1','failed'),('1',None,'failed'),(True,True,'failed'),
+])
+def test_yjs_nested_response_classification_and_short_evidence(outer,nested,expected):
+    body={'status':outer,'resultbody':{'items':[{'status':nested,'private':'PRIVATE'}]},'msg':'account@example.test'}
+    info=rt.packet_info(yjs_packet(body),'123')
+    assert info['outer_status']==(None if outer is None or isinstance(outer,bool) else str(outer))
+    assert info['nested_status']==(None if nested is None or isinstance(nested,bool) else str(nested))
+    assert rt.classify_response(info,adapters.VERIFIED_ENDPOINTS['yingjiesheng'])==expected
+    assert 'PRIVATE' not in json.dumps(info) and 'account@' not in json.dumps(info)
+    assert rt.classify_response({**info,'correlated':False},adapters.VERIFIED_ENDPOINTS['yingjiesheng'])=='pending'
+
+
+@pytest.mark.parametrize('items', [None, [], {}, [None], ['bad'], [{'status':{}}]])
+def test_yjs_nested_malformed_response_not_success(items):
+    info=rt.packet_info(yjs_packet({'status':'1','resultbody':{'items':items}}),'123')
+    assert info['nested_status'] is None
+    assert rt.classify_response(info,adapters.VERIFIED_ENDPOINTS['yingjiesheng'])=='failed'
+
+
+@pytest.mark.parametrize('platform', ['yingjiesheng','liepin','51job','yupao'])
+def test_apply_now_label_only_allowed_for_yjs(platform):
+    adapter=adapters.PlatformAdapter(platform,None,SimpleNamespace(),'040000')
+    adapter.yjs_state={'isapply':'0'}
+    adapter.detail_tab=YjsTab([])
+    adapter._button=lambda c:SimpleNamespace(text=' 立即申请 ',attr=lambda name:None)
+    assert (adapter.verified_button({}) is not None)==(platform=='yingjiesheng')
+
+
+def test_yjs_delivery_tip_prevents_click_and_preserves_reason(checks):
+    events=[];tab=YjsTab(events,tip='需补充企业信息')
+    adapter=yjs_adapter(tab);adapter.detail_tab=tab;adapter.yjs_state={'jobid':'123','isapply':'0'}
+    tab.url='https://q.yingjiesheng.com/jobdetail/123.html'
+    card={'job_id':'123','title':'产品经理'}
+    assert adapter.button_state(card)=='立即申请' and adapter.verified_button(card) is None
+    status,reason,evidence=rt.submit(adapter,card,lambda:pytest.fail('tip 不能预记或点击'))
+    assert status=='review' and reason=='需补充企业信息' and not evidence['attempted']
+    assert events==[]
+
+
+def test_yjs_post_click_dialog_stays_pending_without_dialog_click(checks):
+    events=[];tab=YjsTab(events,dialog=True)
+    adapter=yjs_adapter(tab);adapter.detail_tab=tab;adapter.yjs_state={'jobid':'123','isapply':'0'}
+    tab.url='https://q.yingjiesheng.com/jobdetail/123.html'
+    card={'job_id':'123','title':'产品经理'}
+    status,reason,evidence=rt.submit(adapter,card,lambda:events.append('persist'),timeout=.01)
+    assert status=='pending' and '弹窗' in reason and evidence['attempted']
+    assert events[1:]==['persist','click','stop']
+
+
+def test_yjs_uncalibrated_live_gate_before_browser(tmp_path):
+    parsed=runner.parse_args({'深圳':'040000'},['--job','产品经理','--matcher','keyword'],platform='yingjiesheng')
+    adapter=adapters.PlatformAdapter('yingjiesheng',None,parsed,'040000')
+    stats=runner.execute('yingjiesheng',parsed,config(tmp_path),adapter,tmp_path,rest=lambda *a:None)
+    assert '尚未首单校准' in stats['stop_reason'] and stats['views']==0
+    assert 'yingjiesheng' not in adapters.CALIBRATED
+
+
+@pytest.mark.parametrize('state', [{'isapply':'0'}, {'jobjumptype':'2','isxyzapply':'0'}])
+def test_yjs_title_filter_then_detail_state_then_jev(tmp_path,monkeypatch,state):
+    events=[]
+    cfg=config(tmp_path);cfg['resume_path']='resume.txt';(tmp_path/'resume.txt').write_text('测试简历')
+    monkeypatch.setattr(runner.jev,'load_jev_key',lambda:'test-key')
+    monkeypatch.setattr(runner.jev,'latest_match',lambda *a,**kw:None)
+    monkeypatch.setattr(runner.jev,'title_protected',lambda title:False)
+    def title(*a,**kw):
+        events.append('title')
+        assert events==['title']
+        return False,''
+    def job(*a,**kw):
+        events.append('job')
+        assert events==['title','detail','job']
+        return {'decision':{'decision':'review','reason':'待复核'}}
+    monkeypatch.setattr(runner.jev,'match_title',title)
+    monkeypatch.setattr(runner.jev,'match_job',job)
+    adapter=FakeAdapter([dict(job_id='123',title='产品经理',company='公司A')])
+    def detail(card):
+        events.append('detail')
+        return {**card,'jd':'产品 AI','yjs_state':{'jobid':'123',**state}}
+    adapter.open_detail=detail
+    parsed=runner.parse_args({'深圳':'040000'},['--job','产品经理','--dry-run'],platform='yingjiesheng')
+    stats=runner.execute('yingjiesheng',parsed,cfg,adapter,tmp_path,rest=lambda *a:None)
+    assert stats['review']==1 and events==['title','detail','job']
+
+
+@pytest.mark.parametrize('state,expected', [({'isapply':'0'},'applied'),
+                                         ({'jobjumptype':'2','isxyzapply':'4'},'review')])
+def test_yjs_approved_state_gate_and_one_attempt(tmp_path,monkeypatch,no_jev_approved,state,expected):
+    seed_approved(tmp_path,'yingjiesheng')
+    adapter=ApprovedAdapter();adapter.calibrated=False
+    original=adapter.open_approved_detail
+    adapter.open_approved_detail=lambda c:{**original(c),'yjs_state':{'jobid':c['job_id'],**state}}
+    submitted=[]
+    def applied(a,c,pre,**kw):
+        pre();submitted.append(c['job_id'])
+        assert load_log(tmp_path/'yingjiesheng-深圳-log.json')['pending'][-1]['job_id']==c['job_id']
+        return 'applied','接口确认',{'attempted':True}
+    monkeypatch.setattr(runner,'submit',applied)
+    parsed=runner.parse_args({'深圳':'040000'},['--approved','--calibrate','--job-id','2','--count','1'],platform='yingjiesheng')
+    stats=runner.execute('yingjiesheng',parsed,config(tmp_path),adapter,tmp_path,rest=lambda *a:None)
+    assert adapter.opened==['2'] and stats[expected]==1
+    if expected=='applied':
+        assert submitted==['2'] and '已尝试一次' in stats['stop_reason']
+        assert load_log(tmp_path/'yingjiesheng-深圳-log.json')['applied'][0]['reason'].startswith('[人工批准]')
+    else:
+        assert submitted==[] and stats['pending']==0
+
+
+def test_yjs_approved_uncalibrated_still_refused(tmp_path,no_jev_approved):
+    seed_approved(tmp_path,'yingjiesheng')
+    adapter=ApprovedAdapter();adapter.calibrated=False
+    parsed=runner.parse_args({'深圳':'040000'},['--approved'],platform='yingjiesheng')
+    stats=runner.execute('yingjiesheng',parsed,config(tmp_path),adapter,tmp_path,rest=lambda *a:None)
+    assert '尚未首单校准' in stats['stop_reason'] and not adapter.opened
+
+
+def test_yjs_button_rechecks_url_title_and_api_identity(checks):
+    tab=YjsTab([]);adapter=yjs_adapter(tab);adapter.detail_tab=tab
+    tab.url='https://q.yingjiesheng.com/jobdetail/123.html'
+    adapter.yjs_state={'jobid':'123','isapply':'0'}
+    card={'job_id':'123','title':'产品经理'}
+    assert adapter.verified_button(card) is not None
+    assert adapter.verified_button({**card,'title':'销售'}) is None
+    tab.url='https://q.yingjiesheng.com/jobdetail/999.html'
+    assert adapter.verified_button(card) is None
+    tab.url='https://q.yingjiesheng.com/jobdetail/123.html'
+    adapter.yjs_state['jobid']='999'
+    assert adapter.verified_button(card) is None
+
+
+def test_yjs_submit_correlated_network_evidence(checks,monkeypatch):
+    events=[]
+    packet=yjs_packet({'status':'1','resultbody':{'items':[{'status':'1'}]}})
+    tab=YjsTab(events,[packet]);adapter=yjs_adapter(tab);adapter.detail_tab=tab
+    tab.url='https://q.yingjiesheng.com/jobdetail/123.html'
+    adapter.yjs_state={'jobid':'123','isapply':'0'}
+    ticks=iter(range(1000));monkeypatch.setattr(rt.time,'monotonic',lambda:next(ticks)/100)
+    status,reason,evidence=rt.submit(adapter,{'job_id':'123','title':'产品经理'},lambda:events.append('persist'),timeout=.1)
+    assert status=='applied' and reason=='接口确认' and evidence['packets'][0]['correlated']
+    assert events[1:3]==['persist','click'] and events[-1]=='stop'
+
+
+def test_yjs_dialog_overrides_received_success_evidence(checks,monkeypatch):
+    events=[]
+    tab=YjsTab(events,[yjs_packet({'status':'1','resultbody':{'items':[{'status':'1'}]}})])
+    adapter=yjs_adapter(tab);adapter.detail_tab=tab;adapter.yjs_state={'jobid':'123','isapply':'0'}
+    tab.url='https://q.yingjiesheng.com/jobdetail/123.html'
+    base=tab.listen.wait
+    def wait(**kw):
+        packet=base(**kw)
+        tab.dialog=True
+        return packet
+    tab.listen.wait=wait
+    ticks=iter(range(1000));monkeypatch.setattr(rt.time,'monotonic',lambda:next(ticks)/100)
+    status,reason,evidence=rt.submit(adapter,{'job_id':'123','title':'产品经理'},lambda:events.append('persist'),timeout=.1)
+    assert status=='pending' and '弹窗' in reason and len(evidence['packets'])==1
+    assert events.count('click')==1 and events[-1]=='stop'
+
+
+def test_yjs_runner_uses_51job_view_pacing(tmp_path):
+    cards=[dict(job_id=str(i),title='产品经理',company=f'公司{i}') for i in range(1,6)]
+    adapter=FakeAdapter(cards);original=adapter.open_detail
+    adapter.open_detail=lambda c:{**original(c),'yjs_state':{'jobid':c['job_id'],'isapply':'0'}}
+    parsed=runner.parse_args({'深圳':'040000'},['--job','产品经理','--count','5','--dry-run','--matcher','keyword'],platform='yingjiesheng')
+    rests=[]
+    stats=runner.execute('yingjiesheng',parsed,config(tmp_path),adapter,tmp_path,rest=lambda interval,check:rests.append(interval))
+    assert stats['views']==5 and rests==[(15,30)]*5+[(90,180)]
+    assert rt.PLATFORM_PACING['yingjiesheng']==rt.PLATFORM_PACING['51job']
+
+
 @pytest.mark.parametrize('platform,urls', [
     ('yupao', ('https://yupaowang.com/submit', 'https://yupao-prod.yupaowang.com/submit',
                'https://www.yupao.com/submit', 'https://snssdk.yupaowang.com/analytics')),
@@ -531,7 +931,7 @@ def test_51job_experience_alias_native_selection(monkeypatch,experience,expected
     assert events==['open','selected']
 
 
-@pytest.mark.parametrize('platform,default', [('51job',20),('liepin',60),('yupao',60)])
+@pytest.mark.parametrize('platform,default', [('51job',20),('yingjiesheng',20),('liepin',60),('yupao',60)])
 def test_platform_max_views_default_and_override(platform,default):
     parsed=runner.parse_args({'深圳':'123'},['--job','产品'],platform=platform)
     assert parsed.max_views==default==rt.PLATFORM_PACING[platform]['max_views']
@@ -540,7 +940,7 @@ def test_platform_max_views_default_and_override(platform,default):
         assert parsed.max_views==explicit
 
 
-@pytest.mark.parametrize('platform,limit', [('51job',20),('liepin',60),('yupao',60)])
+@pytest.mark.parametrize('platform,limit', [('51job',20),('yingjiesheng',20),('liepin',60),('yupao',60)])
 def test_main_passes_platform_to_parser(monkeypatch,platform,limit):
     monkeypatch.setattr(runner,'load_config',lambda:{'default_count':2,'min_score':60})
     def execute(p,a,cfg,adapter,root):
@@ -585,6 +985,7 @@ def seed_approved(tmp_path, platform='liepin', approved=('1', '2'), ids=('1', '2
     from review_list import REVIEW_FILE, render_review_list
     rows = [dict(platform=platform, job_id=i, job='产品实习', company=f'公司{i}',
                  url=(f'https://www.liepin.com/job/{i}.shtml' if platform == 'liepin'
+                      else f'https://q.yingjiesheng.com/jobdetail/{i}.html' if platform == 'yingjiesheng'
                       else f'https://www.yupao.com/zhaogong/{i}.html')) for i in ids]
     (tmp_path / f'{platform}-深圳-log.json').write_text(json.dumps({'review': rows}))
     (tmp_path / REVIEW_FILE).write_text(render_review_list(rows, {f'{platform}:{i}' for i in approved}))

@@ -268,7 +268,7 @@ def load_applied_index(skill_dir: Path | None = None) -> set[str]:
                     index.add(key)
                 platform = entry.get("platform") or log_file.name.split("-", 1)[0]
                 job_id = entry.get("job_id") or entry.get("jobId")
-                if job_id and platform in ("boss", "liepin", "51job", "yupao"):
+                if job_id and platform in ("boss", "liepin", "yingjiesheng", "51job", "yupao"):
                     index.add(f"{platform}:{job_id}")
     return index
 

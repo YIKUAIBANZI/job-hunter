@@ -162,7 +162,21 @@ def test_main_mode_order_arguments_and_summary(harness, capsys, live):
     assert ('真投' if live else '试跑') in md
     assert '| boss | 1 |' in md
     logs = list((harness.root / 'runs').rglob('*.log'))
-    assert len(logs) == 4 and any(p.name == '51job-1.log' for p in logs)
+    assert len(logs) == 5 and any(p.name == 'yingjiesheng-1.log' for p in logs)
+
+
+def test_yjs_daily_order_example_and_old_plan_rejection(tmp_path):
+    from pathlib import Path
+    assert daily.PLATFORMS == ('boss','liepin','yingjiesheng','51job','yupao')
+    example = json.loads((Path(__file__).parent / 'daily.example.json').read_text())
+    assert example['platforms']['yingjiesheng'] == {'quota':0,'keywords':['产品经理'],'args':[]}
+    path = tmp_path / 'daily.json'
+    write_json(path, example)
+    assert daily.load_plan(path, {'target_roles':['AI产品','产品实习','产品经理']}) == example
+    del example['platforms']['yingjiesheng']
+    write_json(path, example)
+    with pytest.raises(ValueError, match='yingjiesheng'):
+        daily.load_plan(path, {'target_roles':['AI产品','产品实习','产品经理']})
 
 
 def test_invalid_main_plan_stops_before_processes(harness):
@@ -242,8 +256,8 @@ def test_live_uncalibrated_message_even_nonzero(harness, code):
     harness.actions.append({'code': code, 'output': '停止原因：该平台尚未首单校准；请先 dry-run'})
     result = harness.execute(data, live=True)
     assert len(harness.calls) == 1
-    assert result['platforms'][3]['status'] == '未校准'
-    assert '未校准，跳过' in result['platforms'][3]['note']
+    assert result['platforms'][daily.PLATFORMS.index('yupao')]['status'] == '未校准'
+    assert '未校准，跳过' in result['platforms'][daily.PLATFORMS.index('yupao')]['note']
     assert result['exit_code'] == 0
 
 
@@ -252,7 +266,7 @@ def test_current_entry_cooldown_zero_exit(harness):
     data['platforms']['51job']['quota'] = 3
     harness.actions.append({'output': '停止原因：风控冷却中，剩余 5 分钟；未连接浏览器'})
     result = harness.execute(data)
-    assert len(harness.calls) == 1 and result['platforms'][2]['status'] == '冷却'
+    assert len(harness.calls) == 1 and result['platforms'][daily.PLATFORMS.index('51job')]['status'] == '冷却'
 
 
 def test_pending_stops_next_keyword_without_retry(harness):

@@ -1,4 +1,4 @@
-"""51job、猎聘、鱼泡的统一评估/提交流程，Boss 保留已验证的入口。"""
+"""51job、猎聘、应届生、鱼泡的统一评估/提交流程，Boss 保留已验证的入口。"""
 import argparse
 import hashlib
 import json
@@ -10,7 +10,8 @@ import jev_match as jev
 from apply_runtime import (CHAT_INTERVAL, SUCCESS_REST, SUCCESS_REST_EVERY,
                            PLATFORM_PACING,
                            paced_rest, submit, write_cooldown)
-from platform_adapters import AdapterError, PlatformAdapter, same_job, parse_job_id
+from platform_adapters import (AdapterError, PlatformAdapter, same_job, parse_job_id,
+                               yjs_apply_state, YJS_FILTER_REASON)
 from review_list import approved_review_rows
 from shared import (connect_chrome, cooldown_remaining, dedup_key, is_blacklisted,
                     load_applied_index, load_config, load_log, record, save_log, score_jd)
@@ -33,7 +34,7 @@ def parse_args(city_codes, argv=None, *, platform='liepin', default_count=20, de
     p.add_argument('--match-policy', choices=('review-gate', 'boss-b'), default='review-gate',
                    help='默认 Jev 建议复核不自动投；boss-b 保留交接方案 B')
     p.add_argument('--max-views', type=int, default=PLATFORM_PACING[platform]['max_views'],
-                   help='最多读取详情数；51job 默认 20，其他平台默认 60')
+                   help='最多读取详情数；51job/应届生默认 20，其他平台默认 60')
     p.add_argument('--max-pages', type=int, default=5)
     p.add_argument('--job-type', default='', help='平台工作类型选项，51job 支持；默认不限')
     p.add_argument('--experience', default='', help='平台经验选项：猎聘 实习生/应届生；51job 在校生/应届生')
@@ -42,6 +43,8 @@ def parse_args(city_codes, argv=None, *, platform='liepin', default_count=20, de
     p.add_argument('--fill-queue', action='store_true')
     p.add_argument('--calibrate', action='store_true', help='用户授权后仅真投 1 次，采集首单核验证据')
     args = p.parse_args(argv)
+    if platform == 'yingjiesheng' and any((args.job_type, args.experience, args.degree)):
+        p.error(YJS_FILTER_REASON)
     if args.approved and platform == '51job':
         p.error('51job 暂不支持批准投递，请在页面手动处理')
     if not args.job and not args.approved:
@@ -113,6 +116,8 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
         print(f"[{name}] {entry.get('company','')} | {entry.get('job','')} | ID={entry.get('job_id','')} | {reason}")
 
     try:
+        if platform == 'yingjiesheng' and any((args.job_type, args.experience, args.degree)):
+            raise StopRun(YJS_FILTER_REASON)
         remaining = cooldown_remaining(cooldown_file, datetime.now().astimezone())
         if remaining:
             raise StopRun(f'风控冷却中，剩余 {int(remaining.total_seconds()/60)+1} 分钟；未连接浏览器')
@@ -183,8 +188,15 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                     decision(entry, 'review', '日志详情 URL 与批准岗位 ID 不匹配')
                     continue
                 counts['evaluated'] += 1
+                if card.get('already_applied'):
+                    decision(entry, 'skip', '平台显示已申请')
+                    continue
+                if card.get('external'):
+                    decision(entry, 'skip', '转载或已过期岗位')
+                    continue
                 cache_id = scope + ':' + card['job_id']
                 try:
+                    # 缓存 apply 真投前仍会重开详情，应届生申请状态闸门在详情分支执行。
                     cached = None if args.approved or args.refresh or args.matcher != 'jev' else jev.latest_match(cache_id, cache_file)
                     if cached:
                         result = cached
@@ -222,6 +234,14 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                         if not same_job(card, detail) or not detail.get('jd'):
                             decision(entry, 'review', '卡片与详情 ID/标题不匹配，或 JD 为空')
                             continue
+                        if platform == 'yingjiesheng':
+                            ok, name, reason = yjs_apply_state(detail.get('yjs_state'))
+                            if not ok:
+                                decision(entry, name, reason)
+                                continue
+                            if detail.get('button_reason'):
+                                decision(entry, 'review', detail['button_reason'])
+                                continue
                         entry['url'] = detail.get('url') or entry['url']
                         entry['detail_verified'] = True
                         entry['button_ready'] = detail.get('button_ready')
@@ -346,6 +366,8 @@ def main(platform, city_codes, argv=None):
             return super().open_approved_detail(card)
 
         def search(self, page=1):
+            if self.platform == 'yingjiesheng':
+                self.apply_filters()
             if self.browser is None:
                 self.browser = connect_chrome()
             super().search(page)

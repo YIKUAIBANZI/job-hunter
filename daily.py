@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-PLATFORMS = ('boss', 'liepin', '51job', 'yupao')
+PLATFORMS = ('boss', 'liepin', 'yingjiesheng', '51job', 'yupao')
 BUCKETS = ('applied', 'pending', 'review', 'skipped', 'failed')
 TIMEOUT = 90 * 60
 # 只允许筛选和匹配参数，禁止覆盖编排的城市、关键词、配额和模式。
@@ -42,7 +42,7 @@ def load_plan(path, cfg) -> dict:
         raise ValueError('config.json target_roles 必须是字符串列表')
     platforms = plan['platforms']
     if not isinstance(platforms, dict) or set(platforms) != set(PLATFORMS):
-        raise ValueError('platforms 必须包含且仅包含 boss、liepin、51job、yupao')
+        raise ValueError('platforms 必须包含且仅包含 boss、liepin、yingjiesheng、51job、yupao')
     for platform in PLATFORMS:
         item = platforms[platform]
         if not isinstance(item, dict) or not {'quota', 'keywords', 'args'} <= item.keys():

@@ -164,6 +164,15 @@ def test_load_applied_index_id_does_not_require_company_or_title(tmp_path):
     assert load_applied_index(tmp_path) == {"boss:only-id"}
 
 
+@pytest.mark.parametrize('bucket', ['applied','pending'])
+def test_yjs_index_namespaces_ids_and_legacy_company_key(tmp_path,bucket):
+    (tmp_path/'yingjiesheng-深圳-log.json').write_text(json.dumps({bucket:[
+        {'job_id':'123','company':'公司A','job':'产品经理'},
+        {'jobId':'456'},
+    ]}))
+    assert load_applied_index(tmp_path)=={'yingjiesheng:123','yingjiesheng:456',dedup_key('公司A','产品经理')}
+
+
 def test_load_applied_index_excludes_unsubmitted_buckets(tmp_path):
     entry = {"job_id": "job123", "company": "腾讯", "job": "产品经理"}
     (tmp_path / "boss-x-log.json").write_text(json.dumps({

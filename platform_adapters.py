@@ -2,7 +2,7 @@
 import json
 import re
 import time
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 from apply_runtime import page_block_reason, page_gate_reason, pick_tab, safe_url
 
@@ -10,16 +10,19 @@ class AdapterError(Exception):
     """可安全展示的适配器错误，不含原始网络请求。"""
 
 
-DOMAINS = {'liepin': 'liepin.com', '51job': '51job.com', 'yupao': 'yupao.com'}
+DOMAINS = {'liepin': 'liepin.com', '51job': '51job.com', 'yupao': 'yupao.com',
+           'yingjiesheng': 'yingjiesheng.com'}
 EVIDENCE_DOMAINS = {
     'liepin': ('liepin.com',),
     '51job': ('51job.com',),
     'yupao': ('yupao.com', 'yupaowang.com'),
+    'yingjiesheng': ('yingjiesheng.com',),
 }
 PATTERNS = {
     'liepin': r'^/(?:job|a)/(\d+)\.shtml$',
     '51job': r'^/[^/]+/(\d+)\.html$',
     'yupao': r'^/zhaogong/(\d+)(?:/[A-Za-z0-9_-]+)?\.html$',
+    'yingjiesheng': r'^/jobdetail/(\d+)\.html$',
 }
 
 
@@ -39,6 +42,8 @@ def parse_job_id(platform, href):
 
 def same_job(card, detail):
     return bool(card.get('job_id') and detail.get('job_id') == card['job_id']
+                and ('yjs_state' not in detail or isinstance(detail['yjs_state'], dict)
+                     and str(detail['yjs_state'].get('jobid', '')) == card['job_id'])
                 and card.get('title') and detail.get('title', '').strip() == card['title'].strip())
 
 
@@ -51,7 +56,53 @@ def build_search_url(platform, job, city_code, page=1):
         return 'https://we.51job.com/pc/search?' + urlencode({'keyword': job, 'jobArea': city_code, 'pageNum': page})
     if platform == 'yupao':
         return f'https://www.yupao.com/topic/{city_code}/?' + urlencode({'keywords': job})
+    if platform == 'yingjiesheng':
+        return 'https://q.yingjiesheng.com/jobs/search/' + quote(job, safe='') + '?' + urlencode({'jobarea': city_code})
     raise ValueError('未知平台')
+
+
+YJS_SEARCH_ENDPOINT = 'youngapi.yingjiesheng.com/open/noauth/job/search'
+YJS_DETAIL_ENDPOINT = 'youngapi.yingjiesheng.com/open/noauth/yjs/job/'
+YJS_FILTER_REASON = '应届生工作类型/经验/学历筛选尚未校准，请用关键词 + Jev 硬条件'
+
+
+def yjs_apply_state(state):
+    """页面接口状态只用于关闭投递路径，不以未知状态推断可投。"""
+    if not isinstance(state, dict):
+        return False, 'review', '岗位申请状态未知'
+    if str(state.get('isReprintJob', '')) == '1':
+        return False, 'skip', '转载岗位需去外站投递'
+    incomplete = state.get('isIncomplete')
+    if incomplete is True or incomplete == 1 or str(incomplete).lower() in ('1', 'true'):
+        return False, 'review', '简历不完整，请先完善'
+    if str(state.get('jobjumptype', '')) == '2':
+        volunteer = str(state.get('isxyzapply', ''))
+        if volunteer == '0':
+            return True, 'apply', ''
+        if volunteer in ('1', '3'):
+            return False, 'skip', '已申请（志愿）'
+        if volunteer == '2':
+            return False, 'skip', '已申请该公司其他职位且已被处理'
+        if volunteer == '4':
+            return False, 'review', '需替换志愿，请人工处理'
+        if volunteer == '5':
+            return False, 'review', '需补充企业要求的信息，请人工处理'
+        return False, 'review', '志愿状态未知'
+    if str(state.get('isapply', '')) == '1':
+        return False, 'skip', '平台显示已申请'
+    if str(state.get('isapply', '')) == '0':
+        return True, 'apply', ''
+    return False, 'review', '岗位申请状态未知'
+
+
+def _packet_body(packet):
+    body = packet.response.body if packet else None
+    if isinstance(body, (str, bytes)):
+        try:
+            body = json.loads(body)
+        except (ValueError, UnicodeError):
+            return {}
+    return body if isinstance(body, dict) else {}
 
 
 LIEPIN_CARDS = '''
@@ -79,10 +130,13 @@ return Array.from(document.querySelectorAll('main [data-index]')).map(c=>{
 '''
 
 
-# 只有维护者根据真实首单证据添加精确端点及成功条件。
+# 精确端点按证据登记；前端推导仅供首单校准，不解除未校准门禁。
 # 猎聘：2026-10-14 两次校准（1985442155、1975191697），open-chat 返回 flag=1 且按钮变“继续聊”。
 VERIFIED_ENDPOINTS = {
     'liepin': {'https://api-c.liepin.com/api/com.liepin.im.c.chat.open-chat': ('flag', 1)},
+    # 来自前端 JS，待首单实测确认；不能据此加入 CALIBRATED。
+    'yingjiesheng': {'https://youngapi.yingjiesheng.com/open/yjs/apply':
+                    lambda info: info.get('outer_status') == '1' and info.get('nested_status') == '1'},
 }
 CALIBRATED = {'liepin'}
 
@@ -102,6 +156,9 @@ class PlatformAdapter:
         self.detail_tab = None
         self.owned_details = {}
         self.current = None
+        self.yjs_items = []
+        self.yjs_state = None
+        self.button_reason = ''
 
     def request_id_aliases(self, job_id):
         """猎聘页面 ID = "19" + 接口 jobId（1 个真实样本：1975191697 → 75191697）。"""
@@ -118,6 +175,15 @@ class PlatformAdapter:
 
     def search(self, page=1):
         url = build_search_url(self.platform, self.args.job, self.city_code, page)
+        if self.platform == 'yingjiesheng':
+            self.apply_filters()
+            if self.search_tab is None:
+                p = urlsplit(url)
+                self.search_tab = pick_tab(self.browser.get_tabs(), p.hostname, p.path)
+                if self.search_tab is None:
+                    self.search_tab = self.browser.new_tab()
+            self._yjs_search_packet(lambda: self.search_tab.get(url))
+            return
         if self.search_tab is None:
             p = urlsplit(url)
             self.search_tab = pick_tab(self.browser.get_tabs(), p.hostname, p.path)
@@ -135,6 +201,10 @@ class PlatformAdapter:
         requested = [("工作类型", getattr(self.args, "job_type", "")),
                      ("工作年限", getattr(self.args, "experience", "")),
                      ("学历要求", getattr(self.args, "degree", ""))]
+        if self.platform == 'yingjiesheng':
+            if any(value for _, value in requested):
+                raise AdapterError(YJS_FILTER_REASON)
+            return
         if self.platform == "yupao" and any(value for _, value in requested):
             raise AdapterError("鱼泡无实习/学历/经验筛选，请用关键词（如 ‘AI产品实习’）并依赖 Jev 硬条件")
         for label, value in requested:
@@ -210,6 +280,18 @@ class PlatformAdapter:
         return '', ''
 
     def cards(self):
+        if self.platform == 'yingjiesheng':
+            cards = []
+            for item in self.yjs_items:
+                job_id = str(item.get('jobid') or '')
+                url = f'https://q.yingjiesheng.com/jobdetail/{job_id}.html'
+                cards.append({'job_id': job_id, 'title': item.get('jobname') or '',
+                              'company': item.get('coname') or '', 'salary': item.get('providesalary') or '',
+                              'tags': ' '.join(str(item.get(k) or '') for k in
+                                               ('jobarea', 'workyear', 'degree', 'jobterm', 'jobtag')),
+                              'href': url, 'url': url, 'already_applied': str(item.get('isapply')) == '1',
+                              'external': str(item.get('isReprintJob')) == '1' or str(item.get('isExpire')) == '1'})
+            return cards
         script = {'liepin': LIEPIN_CARDS, '51job': JOB51_CARDS, 'yupao': YUPAO_CARDS}[self.platform]
         cards = self.search_tab.run_js(script) or []
         for c in cards:
@@ -235,6 +317,8 @@ class PlatformAdapter:
            'a[data-nick="job-detail-job-info"]' if self.platform == 'liepin' else 'main [data-index] a[href*="/zhaogong/"]')
 
     def open_detail(self, card):
+        if self.platform == 'yingjiesheng':
+            return self.open_approved_detail({**card, 'url': f"https://q.yingjiesheng.com/jobdetail/{card['job_id']}.html"})
         self.close_detail()
         self.current = card
         element = self.locate_card(card)
@@ -292,7 +376,19 @@ class PlatformAdapter:
         tab = self.browser.new_tab()
         self.detail_tab = tab
         self.owned_details[tab.tab_id] = tab
-        tab.get(card['url'])
+        if self.platform == 'yingjiesheng':
+            tab.listen.start(YJS_DETAIL_ENDPOINT)
+            try:
+                tab.get(card['url'])
+                state = _packet_body(tab.listen.wait(timeout=15, raise_err=False)).get('resultbody')
+                if not isinstance(state, dict):
+                    raise AdapterError('应届生详情接口未返回岗位数据')
+                self.yjs_state = {k: state.get(k) for k in
+                                  ('jobid', 'jobname', 'isapply', 'jobjumptype', 'isxyzapply', 'isReprintJob', 'isIncomplete')}
+            finally:
+                tab.listen.stop()
+        else:
+            tab.get(card['url'])
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
             status, reason = self.check()
@@ -302,6 +398,8 @@ class PlatformAdapter:
             if same_job(card, result) and result.get('jd'):
                 result['button_state'] = self.button_state(card)
                 result['button_ready'] = self.verified_button(card) is not None
+                if self.platform == 'yingjiesheng':
+                    result['button_reason'] = self.button_reason
                 return result
             time.sleep(.5)
         return self.detail_snapshot()
@@ -316,7 +414,14 @@ class PlatformAdapter:
         tab = self.action_tab if approved else self.search_tab if self.platform == 'yupao' else self.detail_tab
         if tab is None:
             return {}
-        if self.platform == 'yupao':
+        if self.platform == 'yingjiesheng':
+            data = tab.run_js('''
+                const text=s=>document.querySelector(s)?.innerText.trim()||'';
+                return {title:text('.detail-title-left-top .job'),jd:text('.detail-content-common.jobinfo'),company:''};
+            ''') or {}
+            data['job_id'] = parse_job_id(self.platform, tab.url)
+            data['yjs_state'] = self.yjs_state or {}
+        elif self.platform == 'yupao':
             data = tab.run_js('''
                 const r=document.querySelector('#mainR');const text=s=>r?.querySelector(s)?.innerText.trim()||'';
                 return {title:text('h1'),jd:text('.afghh'),company:text('.afgec')||text('.afiag'),
@@ -343,6 +448,11 @@ class PlatformAdapter:
     def _button(self, card):
         if not same_job(card, self.detail_snapshot()):
             return None
+        if self.platform == 'yingjiesheng':
+            return self.action_tab.run_js('''
+                return Array.from(document.querySelectorAll('.delivery-btn'))
+                  .find(e=>e.getClientRects().length && getComputedStyle(e).visibility!=='hidden')||null;
+            ''')
         if self.platform == '51job':
             c = self.locate_card(card)
             return c.ele('css:button.btn.apply', timeout=.2) if c else None
@@ -357,10 +467,23 @@ class PlatformAdapter:
         ''', root, json.dumps((['发送简历'] if self.platform == 'yupao' else ['聊一聊']) + list(self.success_texts)))
 
     def verified_button(self, card):
+        if self.platform == 'yingjiesheng':
+            self.button_reason = self.action_tab.run_js('''
+                return Array.from(document.querySelectorAll('.delivery-tip'))
+                  .filter(e=>e.getClientRects().length && getComputedStyle(e).visibility!=='hidden')
+                  .map(e=>e.innerText.trim()).find(Boolean)||'';
+            ''') or ''
+            if self.button_reason:
+                return None
+            ok, _, reason = yjs_apply_state(self.yjs_state)
+            if not ok:
+                self.button_reason = reason
+                return None
         b = self._button(card)
         if not b or b.attr('disabled') is not None or b.attr('aria-disabled') == 'true':
             return None
-        if b.text.strip() not in ('投递', '申请职位', '聊一聊', '发送简历'):
+        labels = ('立即申请',) if self.platform == 'yingjiesheng' else ('投递', '申请职位', '聊一聊', '发送简历')
+        if b.text.strip() not in labels:
             return None
         return b
 
@@ -369,6 +492,21 @@ class PlatformAdapter:
         return b.text.strip() if b else ''
 
     def next_page(self, number):
+        if self.platform == 'yingjiesheng':
+            self.search_tab.listen.start(YJS_SEARCH_ENDPOINT)
+            try:
+                element = self.search_tab.run_js('''
+                    return Array.from(document.querySelectorAll('.search-list-pagination .el-pager li.number'))
+                      .find(e=>e.textContent.trim()===arguments[0])||null;
+                ''', str(number))
+                if element is None:
+                    return False
+                self.yjs_items = []
+                element.click(by_js=False)
+                self._read_yjs_items()
+                return True
+            finally:
+                self.search_tab.listen.stop()
         if self.platform == 'yupao':
             old = {c['job_id'] for c in self.cards()}
             self.search_tab.run_js('window.scrollTo(0,document.body.scrollHeight)')
@@ -376,6 +514,35 @@ class PlatformAdapter:
             return bool({c['job_id'] for c in self.cards()} - old)
         self.search(number)
         return True
+
+    def _read_yjs_items(self):
+        try:
+            body = _packet_body(self.search_tab.listen.wait(timeout=15, raise_err=False))
+            items = body['resultbody']['searchData']['joblist']['items']
+            if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+                raise ValueError
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise AdapterError('应届生搜索接口未返回岗位数据') from None
+        self.yjs_items = items
+
+    def _yjs_search_packet(self, navigate):
+        self.yjs_items = []
+        self.search_tab.listen.start(YJS_SEARCH_ENDPOINT)
+        try:
+            navigate()
+            self._read_yjs_items()
+        finally:
+            self.search_tab.listen.stop()
+
+    def submission_gate_reason(self):
+        if self.platform != 'yingjiesheng':
+            return ''
+        # 授权、简历完善等弹窗均交给人工；绝不点击其中的按钮。
+        return self.action_tab.run_js('''
+            return Array.from(document.querySelectorAll('.el-dialog'))
+              .some(e=>e.getClientRects().length && getComputedStyle(e).visibility!=='hidden')
+              ? '点击后出现弹窗，请人工处理' : '';
+        ''') or ''
 
     def close_detail(self):
         for tab in self.owned_details.values():
@@ -385,6 +552,8 @@ class PlatformAdapter:
                 pass
         self.owned_details.clear()
         self.detail_tab = None
+        self.yjs_state = None
+        self.button_reason = ''
 
     def close(self):
         self.close_detail()

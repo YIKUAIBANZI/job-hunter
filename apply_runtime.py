@@ -20,6 +20,8 @@ PLATFORM_PACING = {
     # 51job 详情风控更敏感，默认降低浏览上限并延长休息。
     '51job': {**_DEFAULT_PACING, 'view_interval': (15, 30), 'view_rest_every': 5,
               'view_rest': (90, 180), 'max_views': 20},
+    'yingjiesheng': {**_DEFAULT_PACING, 'view_interval': (15, 30), 'view_rest_every': 5,
+                    'view_rest': (90, 180), 'max_views': 20},
 }
 BLOCK_WORDS = ('上限', '频繁', '验证', '异常', '验证码', '操作过快', '访问受限')
 
@@ -110,10 +112,17 @@ def packet_info(packet, job_id, aliases=()):
     body = body if isinstance(body, dict) else {}
     ids = request_job_ids(packet.request.postData) | request_job_ids(parse_qs(urlsplit(packet.url).query))
     message = str(body.get('message') or body.get('msg') or '')
+    # 只取前端成功判定需要的短码，不保存 resultbody 原文。
+    items = (body.get('resultbody') or {}).get('items') if isinstance(body.get('resultbody'), dict) else None
+    nested = items[0].get('status') if isinstance(items, list) and items and isinstance(items[0], dict) else None
+    def status_code(value):
+        return str(value) if isinstance(value, (str, int, float)) and not isinstance(value, bool) else None
     # 不保存请求体或原始消息（其中可能含用户信息），保留判定需要的分类。
     return {'url': safe_url(packet.url), 'http_status': packet.response.status,
             'code': body.get('code') if isinstance(body.get('code'), (str, int)) and not isinstance(body.get('code'), bool) else None,
             'body_type': body_type,
+            'outer_status': status_code(body.get('status')),
+            'nested_status': status_code(nested),
             'body_fields': sorted(str(k) for k in body)[:20],
             # 仅保存非身份类业务标志用于首单校准；不据此推断未知协议成功。
             'business_flags': {k: body[k] for k in ('flag', 'success', 'status', 'statusCode')
@@ -130,10 +139,12 @@ def classify_response(info, verified_endpoints=()):
     if info.get('url') not in verified_endpoints or not info.get('correlated'):
         return 'pending'
     # 各平台成功码必须由真实首单校准后提供，禁止套用 Boss code=0。
-    # 成功条件为 code 值，或 (业务字段, 值)，如猎聘 ('flag', 1)。
+    # 成功条件为 code 值、(业务字段, 值)，或只读脱敏证据的判定函数。
     for endpoint, expect in verified_endpoints.items():
         if info['url'] == endpoint:
-            if isinstance(expect, tuple):
+            if callable(expect):
+                ok = expect(info)
+            elif isinstance(expect, tuple):
                 ok = (info.get('business_flags') or {}).get(expect[0]) == expect[1]
             else:
                 ok = info.get('code') == expect
@@ -160,13 +171,13 @@ def submit(adapter, card, before_click, *, dry_run=False, timeout=8):
             return 'skipped', '已投递或已沟通', evidence
         button = adapter.verified_button(card)
         if button is None:
-            return 'review', '按钮身份不匹配或不可用', evidence
+            return 'review', getattr(adapter, 'button_reason', '') or '按钮身份不匹配或不可用', evidence
         # 捕获正常 UI 产生的 XHR/Fetch；不重放接口、不记录鉴权数据。
         tab.listen.start(True, method=True, res_type=('XHR', 'Fetch'))
         listening = True
         button = adapter.verified_button(card)
         if button is None:
-            return 'review', '点击前岗位发生变化', evidence
+            return 'review', getattr(adapter, 'button_reason', '') or '点击前岗位发生变化', evidence
         before_click()
         evidence['attempted'] = True
         button.click(by_js=False)
@@ -176,6 +187,10 @@ def submit(adapter, card, before_click, *, dry_run=False, timeout=8):
             reason = page_block_reason(tab)
             if reason:
                 return 'blocked', reason, evidence
+            if hasattr(adapter, 'submission_gate_reason'):
+                reason = adapter.submission_gate_reason()
+                if reason:
+                    return 'pending', reason, evidence
             packet = tab.listen.wait(timeout=min(.5, max(.01, deadline-time.monotonic())), raise_err=False)
             if packet:
                 # 页面与业务接口可能使用不同域名；同平台埋点仍由精确端点核验排除。
@@ -198,6 +213,10 @@ def submit(adapter, card, before_click, *, dry_run=False, timeout=8):
                         other.append(url)
             # 只接受同一岗位的按钮发生成功状态变化；全页出现“成功”不算。
             evidence['ui_after'] = adapter.button_state(card)
+        if hasattr(adapter, 'submission_gate_reason'):
+            reason = adapter.submission_gate_reason()
+            if reason:
+                return 'pending', reason, evidence
         if network == 'failed':
             return 'pending', '接口与页面结果需人工核验', evidence
         if network == 'applied' or (evidence['ui_after'] in adapter.success_texts

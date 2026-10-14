@@ -85,3 +85,18 @@ def test_approved_lookup_uses_log_url_only_and_skips_applied(tmp_path):
     assert review.approved_review_rows(tmp_path, 'boss', '深圳')[0]['url'] == 'https://example.com/job'
     (tmp_path / 'boss-other-log.json').write_text(json.dumps({'applied': [row()]}))
     assert not review.approved_review_rows(tmp_path, 'boss', '深圳')
+
+
+def test_yjs_review_list_approval_regeneration_and_pending_exclusion(tmp_path,monkeypatch):
+    monkeypatch.setattr(review,'__file__',str(tmp_path/'review_list.py'))
+    candidate={**row('yingjiesheng','123'),'url':'https://q.yingjiesheng.com/jobdetail/123.html'}
+    (tmp_path/'yingjiesheng-深圳-log.json').write_text(json.dumps({'review':[candidate]}))
+    path=tmp_path/review.REVIEW_FILE
+    path.write_text(review.render_review_list([candidate],{'yingjiesheng:123'}))
+    review.main(['--city','深圳'])
+    assert review.parse_approved(path.read_text())=={'yingjiesheng:123'}
+    assert review.approved_review_rows(tmp_path,'yingjiesheng','深圳')[0]['url']==candidate['url']
+    (tmp_path/'yingjiesheng-北京-log.json').write_text(json.dumps({'pending':[candidate]}))
+    review.main(['--city','深圳'])
+    assert '| 123 |' not in path.read_text()
+    assert not review.approved_review_rows(tmp_path,'yingjiesheng','深圳')
