@@ -81,8 +81,8 @@ BOSS 保留已实测流程，其余平台共用运行器。**离线测试或只�
 | BOSS | `boss_apply.py` | 保留已实测流程 |
 | 猎聘 | `liepin_apply.py` | 已校准 |
 | 应届生求职网 `yingjiesheng` | `yingjiesheng_apply.py` | 已校准 |
-| 51job | `51job_apply.py` | 待校准 |
-| 鱼泡 | `yupao_apply.py` | 待校准 |
+| 51job | `51job_apply.py` | 已校准 |
+| 鱼泡 | `yupao_apply.py` | 已校准（对口岗位少，默认配额 0） |
 
 应届生搜索与详情数据只监听页面自身请求，详情在自建标签直接导航并于结束关闭；投递须 ID + 标题一致、状态允许、原生点击“立即申请”。卡片已申请、转载或过期直接跳过；志愿替换、企业补充信息及简历不完整进入人工复核，均不调模型。详情状态检查先于标题粗筛与匹配缓存。可见 `.delivery-tip` 记录其文字并复核；点击后出现 `.el-dialog` 保留 pending 并停止，不点击任何弹窗按钮。
 
@@ -287,7 +287,7 @@ python3 review_list.py --city 深圳  # 仅该城市
 ```bash
 python3 boss_apply.py --approved --city 深圳 --count 1
 python3 liepin_apply.py --approved --city 深圳 --count 1
-# 鱼泡尚未校准，仍需锁定已勾选 ID，授权后只尝试一次
+# 新平台或重新校准：锁定已勾选 ID，授权后只尝试一次
 python3 yupao_apply.py --approved --city 深圳 --calibrate --count 1 --job-id 已确认的数字职位ID
 python3 yingjiesheng_apply.py --approved --city 深圳 --count 1
 ```
@@ -300,7 +300,7 @@ BOSS 直接打开日志详情 URL，点击前复核 URL 中的 ID、`.job-banner
 
 ## 首单校准与结果
 
-猎聘与应届生按上表标为已校准，51job/鱼泡待维护者确认；当前代码 `platform_adapters.CALIBRATED` 已含 51job，与本规格的表格状态有差异，需维护者核对证据。本次不改校准代码。未加入集合的平台，普通真实批量运行会在连接浏览器前停止。**真实投递须先征得用户对该平台和岗位的明确授权**，首次使用或重新校准仅运行一份：
+猎聘、应届生、51job、鱼泡均已用真实首单校准（接口与页面双证据），见 `platform_adapters.VERIFIED_ENDPOINTS` 注释。未加入 `CALIBRATED` 的平台，普通真实批量运行会在连接浏览器前停止。**真实投递须先征得用户对该平台和岗位的明确授权**，首次使用或重新校准仅运行一份：
 
 ```bash
 # 仅在只读验证、登录、匹配结论及用户授权均完成后运行

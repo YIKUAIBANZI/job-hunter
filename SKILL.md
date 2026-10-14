@@ -61,7 +61,7 @@ python3 config_tool.py check
 | 猎聘 | `liepin_apply.py` | 已校准 |
 | 应届生求职网 | `yingjiesheng_apply.py` | 已校准 |
 | 51job | `51job_apply.py` | 已校准 |
-| 鱼泡 | `yupao_apply.py` | 待校准 |
+| 鱼泡 | `yupao_apply.py` | 已校准（对口岗位少，默认配额 0） |
 
 状态与代码门禁有差异时，以具体证据和 `platform_adapters.CALIBRATED` 核对，不靠改文档解除门禁。推荐/复核/跳过只是匹配结论，不等于实投。
 

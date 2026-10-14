@@ -474,7 +474,7 @@ def test_calibrated_platforms_and_alias_scoped():
     a=adapters.PlatformAdapter.__new__(adapters.PlatformAdapter)
     a.platform='yupao'
     assert a.request_id_aliases('1912345678')==set()
-    assert adapters.CALIBRATED=={'liepin','yingjiesheng','51job'}
+    assert adapters.CALIBRATED=={'liepin','yingjiesheng','51job','yupao'}
 
 
 @pytest.mark.parametrize('url,expected', [
@@ -759,12 +759,20 @@ def test_yjs_post_click_dialog_stays_pending_without_dialog_click(checks):
     assert events[1:]==['persist','click','stop']
 
 
-def test_yupao_uncalibrated_live_gate_before_browser(tmp_path):
+def test_uncalibrated_live_gate_before_browser(tmp_path, monkeypatch):
+    # 全部平台已校准后，用临时移出 CALIBRATED 的方式验证门禁仍生效
+    monkeypatch.setattr(adapters, 'CALIBRATED', {'liepin'})
     parsed=runner.parse_args({'深圳':'shenzhen'},['--job','产品经理','--matcher','keyword'],platform='yupao')
     adapter=adapters.PlatformAdapter('yupao',None,parsed,'shenzhen')
     stats=runner.execute('yupao',parsed,config(tmp_path),adapter,tmp_path,rest=lambda *a:None)
     assert '尚未首单校准' in stats['stop_reason'] and stats['views']==0
-    assert 'yupao' not in adapters.CALIBRATED
+
+
+@pytest.mark.parametrize('code,expected', [(0,'applied'),(1,'failed')])
+def test_yupao_im_call_classification(code,expected):
+    info={'url':'https://yupao-prod.yupaowang.com/job/v3/contact/job/im/call','http_status':200,
+          'correlated':True,'code':code,'blocked':False}
+    assert rt.classify_response(info,adapters.VERIFIED_ENDPOINTS['yupao'])==expected
 
 
 @pytest.mark.parametrize('state', [{'isapply':'0'}, {'jobjumptype':'2','isxyzapply':'0'}])
