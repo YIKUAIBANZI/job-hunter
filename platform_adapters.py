@@ -563,6 +563,31 @@ class PlatformAdapter:
                 return True
             finally:
                 self.search_tab.listen.stop()
+        if self.platform == '51job':
+            # 51job 忽略 URL 的 pageNum（实测第 2 页返回 pageNum=1），须原生点击页码；筛选随页面保留
+            self.search_tab.listen.start('we.51job.com/api/job/search-pc')
+            try:
+                element = self.search_tab.run_js('''
+                    return Array.from(document.querySelectorAll('.el-pager li.number'))
+                      .find(e=>e.textContent.trim()===arguments[0])||null;
+                ''', str(number))
+                if element is None:
+                    return False
+                element.click(by_js=False)
+                packet = self.search_tab.listen.wait(timeout=15, raise_err=False)
+                try:
+                    items = _packet_body(packet)['resultbody']['job']['items']
+                    if not isinstance(items, list) or any(
+                            not isinstance(item, dict) or not isinstance(item.get('jobId'), str)
+                            or not item['jobId'] for item in items):
+                        raise ValueError
+                except (KeyError, TypeError, ValueError, AttributeError):
+                    raise AdapterError('51job 翻页后搜索接口未返回岗位数据') from None
+                self.job51_items = {item['jobId']: item for item in items}
+                time.sleep(3)  # 等 DOM 卡片换页
+                return True
+            finally:
+                self.search_tab.listen.stop()
         if self.platform == 'yupao':
             old = {c['job_id'] for c in self.cards()}
             self.search_tab.run_js('window.scrollTo(0,document.body.scrollHeight)')

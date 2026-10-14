@@ -1088,6 +1088,8 @@ class Job51Tab:
     def run_js(self, script, *args):
         if script == adapters.JOB51_CARDS:
             return [dict(c) for c in self.items]
+        if '.el-pager li.number' in script:
+            return getattr(self, 'page_element', None)
         assert 'd.jobId' in script and 'd.jobTitle.trim()' in script
         return self.element if any((c['job_id'], c['title'].strip()) == args for c in self.items) else None
 
@@ -1139,9 +1141,17 @@ def test_51job_search_last_filter_packet_and_next_page(monkeypatch, existing):
     assert events[0 if existing else 1]==('listen', ('we.51job.com/api/job/search-pc',), {})
     assert events[-1]=='stop'
     assert [e[0] for e in events if isinstance(e,tuple)]==['listen','get','wait','wait','wait']
+    # 51job 忽略 URL pageNum：翻页必须原生点击页码，不重新导航
     final={**final, 'jobId':'456'}
+    url_before=tab.url
+    def click(by_js=None):
+        assert by_js is False
+        events.append('page-click'); tab.listen.packets.append(job51_packet([final]))
+    tab.page_element=SimpleNamespace(click=click)
     assert adapter.next_page(2) and adapter.job51_items=={'456':final}
-    assert 'pageNum=2' in tab.url and events.count('stop')==2
+    assert tab.url==url_before and 'page-click' in events and events.count('stop')==2
+    tab.page_element=None
+    assert adapter.next_page(9) is False
 
 
 @pytest.mark.parametrize('body', [None, {}, {'resultbody':None},
@@ -1418,3 +1428,22 @@ def test_51job_light_apply_endpoint_classification(outer,msg,expected):
     info={'url':url,'http_status':200,'correlated':True,'outer_status':outer,
           'success_message':msg=='成功','blocked':False}
     assert rt.classify_response(info,adapters.VERIFIED_ENDPOINTS['51job'])==expected
+
+
+def test_detail_closed_before_post_submit_rest(tmp_path, monkeypatch):
+    # 2026-10-15 猎聘批量：成功后详情页聊天窗被休息期 check 误判为简历弹窗而停止
+    adapter = FakeAdapter([dict(job_id=str(i), title='产品经理', company=f'公司{i}') for i in (1, 2)])
+    adapter.calibrated = True
+    events = []
+    original_close = adapter.close_detail
+    adapter.close_detail = lambda: (events.append('close'), original_close())[1]
+    def submit(a, c, pre, **kw):
+        pre(); events.append('submit')
+        return 'applied', '接口确认', {'attempted': True}
+    monkeypatch.setattr(runner, 'submit', submit)
+    parsed = runner.parse_args({'深圳': '1'}, ['--job', '产品经理', '--count', '2', '--matcher', 'keyword', '--min-score', '0'])
+    stats = runner.execute('liepin', parsed, config(tmp_path), adapter, tmp_path,
+                           rest=lambda *a: events.append('rest'))
+    assert stats['applied'] == 2
+    first = events.index('submit')
+    assert events[first + 1] == 'close' and 'rest' in events[first + 2:]

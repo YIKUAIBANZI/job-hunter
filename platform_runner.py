@@ -336,6 +336,9 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                     if evidence['attempted']:
                         if args.calibrate:
                             raise StopRun('首单校准已尝试一次，请检查双证据；未自动开启批量投递')
+                        # 提交后猎聘会在详情页弹出聊天窗（含“完善简历”等字样），
+                        # 休息期间的 check 会误判为登录/简历弹窗；结果已落盘，先关详情再休息
+                        adapter.close_detail()
                         rest(CHAT_INTERVAL, check)
                         if status == 'applied' and counts['applied'] % SUCCESS_REST_EVERY == 0:
                             rest(SUCCESS_REST, check)
