@@ -579,3 +579,166 @@ def test_51job_runner_respects_view_limit(tmp_path,explicit,expected):
     stats=runner.execute('51job',parsed,config(tmp_path),adapter,tmp_path,rest=lambda *a:None)
     assert stats['views']==len(adapter.opened)==expected
     assert stats['stop_reason']=='已达 --max-views 上限'
+
+
+def seed_approved(tmp_path, platform='liepin', approved=('1', '2'), ids=('1', '2', '3')):
+    from review_list import REVIEW_FILE, render_review_list
+    rows = [dict(platform=platform, job_id=i, job='产品实习', company=f'公司{i}',
+                 url=(f'https://www.liepin.com/job/{i}.shtml' if platform == 'liepin'
+                      else f'https://www.yupao.com/zhaogong/{i}.html')) for i in ids]
+    (tmp_path / f'{platform}-深圳-log.json').write_text(json.dumps({'review': rows}))
+    (tmp_path / REVIEW_FILE).write_text(render_review_list(rows, {f'{platform}:{i}' for i in approved}))
+
+
+class ApprovedAdapter(FakeAdapter):
+    def search(self): pytest.fail('批准模式不得搜索')
+    def cards(self): pytest.fail('批准模式不得读取搜索列表')
+    def next_page(self, n): pytest.fail('批准模式不得翻页')
+    def open_detail(self, card): pytest.fail('批准模式不得点击搜索卡片')
+    def open_approved_detail(self, card): return super().open_detail(card)
+
+
+@pytest.fixture
+def no_jev_approved(monkeypatch):
+    def fail(*a, **kw): pytest.fail('批准模式不得读取 key、缓存或调用 Jev/评分')
+    for name in ('load_jev_key', 'match_title', 'match_job', 'latest_match'):
+        monkeypatch.setattr(runner.jev, name, fail)
+    monkeypatch.setattr(runner, 'score_jd', fail)
+    monkeypatch.setattr(runner, 'cache_scope', fail)
+
+
+def test_liepin_approved_only_checked_count_pending_order_and_dedup(tmp_path, monkeypatch, no_jev_approved):
+    seed_approved(tmp_path)
+    submitted = []
+
+    def applied(adapter, card, pre, **kw):
+        pre()
+        pending = load_log(tmp_path / 'liepin-深圳-log.json')['pending']
+        assert pending[-1]['job_id'] == card['job_id']
+        submitted.append(card['job_id'])
+        return 'applied', '当前岗位按钮确认成功', {'attempted': True}
+
+    monkeypatch.setattr(runner, 'submit', applied)
+    a = args('--approved', '--matcher', 'jev', '--count', '1')
+    adapter = ApprovedAdapter()
+    stats = run(tmp_path, adapter, a)
+    assert stats['applied'] == 1 and adapter.opened == ['1']
+    run(tmp_path, ApprovedAdapter(), args('--approved', '--matcher', 'jev'))
+    assert submitted == ['1', '2']
+    log = load_log(tmp_path / 'liepin-深圳-log.json')
+    assert not log['pending'] and len(log['applied']) == 2
+    assert all(r['reason'].startswith('[人工批准]') for r in log['applied'])
+    adapter = ApprovedAdapter()
+    run(tmp_path, adapter, a)
+    assert not adapter.opened
+
+
+def test_approved_platform_identity_mismatch_no_submit(tmp_path, monkeypatch, no_jev_approved):
+    seed_approved(tmp_path)
+    monkeypatch.setattr(runner, 'submit', lambda *a, **kw: pytest.fail('身份不符不得提交'))
+    stats = run(tmp_path, ApprovedAdapter(bad_detail=True), args('--approved'))
+    assert stats['review'] == 2 and not stats['applied']
+    assert not load_log(tmp_path / 'liepin-深圳-log.json')['pending']
+
+
+def test_approved_platform_pending_stops_and_preserves_dedup(tmp_path, monkeypatch, no_jev_approved):
+    seed_approved(tmp_path)
+
+    def pending(adapter, card, pre, **kw):
+        pre()
+        return 'pending', '未知结果', {'attempted': True}
+
+    monkeypatch.setattr(runner, 'submit', pending)
+    adapter = ApprovedAdapter()
+    stats = run(tmp_path, adapter, args('--approved'))
+    assert stats['pending'] == 1 and adapter.opened == ['1']
+    assert 'liepin:1' in load_applied_index(tmp_path)
+
+
+def test_approved_platform_cooldown_no_connection(tmp_path, no_jev_approved):
+    from datetime import datetime, timedelta
+    seed_approved(tmp_path)
+    (tmp_path / 'liepin-cooldown.json').write_text(json.dumps({
+        'until': (datetime.now().astimezone() + timedelta(hours=1)).isoformat()}))
+    adapter = ApprovedAdapter()
+    stats = run(tmp_path, adapter, args('--approved'))
+    assert not adapter.opened and '未连接浏览器' in stats['stop_reason']
+
+
+def test_approved_51job_parse_error(capsys):
+    with pytest.raises(SystemExit) as exc:
+        runner.parse_args({'深圳': '123'}, ['--approved'], platform='51job')
+    assert exc.value.code == 2 and '51job 暂不支持批准投递' in capsys.readouterr().err
+
+
+def test_approved_uncalibrated_requires_same_calibration_gate(tmp_path, no_jev_approved):
+    seed_approved(tmp_path, 'yupao')
+    a = runner.parse_args({'深圳': '123'}, ['--approved'], platform='yupao')
+    adapter = ApprovedAdapter()
+    adapter.calibrated = False
+    stats = runner.execute('yupao', a, config(tmp_path), adapter, tmp_path, rest=lambda *a: None)
+    assert not adapter.opened and '尚未首单校准' in stats['stop_reason']
+    for flags in (['--calibrate'], ['--calibrate', '--job-id', '1'],
+                  ['--calibrate', '--job-id', '1', '--count', '1', '--fill-queue']):
+        with pytest.raises(SystemExit):
+            runner.parse_args({'深圳': '123'}, ['--approved', *flags], platform='yupao')
+
+
+def test_approved_yupao_calibration_attempts_one_checked_job(tmp_path, monkeypatch, no_jev_approved):
+    seed_approved(tmp_path, 'yupao')
+    a = runner.parse_args({'深圳': '123'}, ['--approved', '--calibrate', '--count', '1', '--job-id', '2'], platform='yupao')
+    adapter = ApprovedAdapter()
+    adapter.calibrated = False
+
+    def pending(adapter, card, pre, **kw):
+        pre()
+        return 'pending', '待核验', {'attempted': True}
+
+    monkeypatch.setattr(runner, 'submit', pending)
+    stats = runner.execute('yupao', a, config(tmp_path), adapter, tmp_path, rest=lambda *a: None)
+    assert stats['pending'] == 1 and adapter.opened == ['2']
+
+
+def test_approved_dry_run_no_submit(tmp_path, monkeypatch, no_jev_approved):
+    seed_approved(tmp_path)
+    monkeypatch.setattr(runner, 'submit', lambda *a, **kw: pytest.fail('dry-run 不得提交'))
+    stats = run(tmp_path, ApprovedAdapter(), args('--approved', '--dry-run', '--count', '1'))
+    assert stats['evaluated'] == 1 and not stats['applied'] and not stats['pending']
+
+
+@pytest.mark.parametrize('platform', ['liepin', 'yupao'])
+def test_approved_adapter_direct_navigation_identity_and_cleanup(monkeypatch, platform):
+    events = []
+    monkeypatch.setattr(adapters, 'page_block_reason', lambda tab: '')
+    monkeypatch.setattr(adapters, 'page_gate_reason', lambda tab: '')
+    a = runner.parse_args({'深圳': '123'}, ['--approved'], platform=platform)
+    url = 'https://www.liepin.com/job/123.shtml' if platform == 'liepin' else 'https://www.yupao.com/zhaogong/123.html'
+    card = {'job_id': '123', 'title': '产品实习', 'url': url}
+    button = SimpleNamespace(text='聊一聊' if platform == 'liepin' else '发送简历', attr=lambda name: None)
+
+    class Tab:
+        tab_id = 'owned'
+        url = ''
+        title = '产品实习'
+        def get(self, url):
+            events.append(url)
+            self.url = url
+        def run_js(self, script, *args):
+            if 'const roots=' in script:
+                return button
+            return {'title': self.title, 'jd': '产品实习 JD', 'company': '公司', 'href': url}
+        def close(self): events.append('closed')
+
+    tab = Tab()
+    adapter = adapters.PlatformAdapter(platform, SimpleNamespace(new_tab=lambda: tab), a, '123')
+    snapshot = adapter.open_approved_detail(card)
+    assert same_job(card, snapshot) and snapshot['button_ready']
+    assert adapter.search_tab is None and adapter.action_tab is tab and events == [url]
+    assert adapter.verified_button(card) is button
+    tab.title = '销售'
+    assert adapter.verified_button(card) is None
+    tab.title = '产品实习'
+    tab.url = url.replace('123', '999')
+    assert adapter.verified_button(card) is None
+    adapter.close()
+    assert events == [url, 'closed'] and not adapter.owned_details

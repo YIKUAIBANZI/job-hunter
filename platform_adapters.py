@@ -112,6 +112,8 @@ class PlatformAdapter:
 
     @property
     def action_tab(self):
+        if getattr(self.args, 'approved', False):
+            return self.detail_tab
         return self.search_tab if self.platform in ('51job', 'yupao') else self.detail_tab
 
     def search(self, page=1):
@@ -279,13 +281,39 @@ class PlatformAdapter:
                 if self.opened_by_search(tab):
                     self.owned_details.setdefault(tab_id, tab)
 
+    def open_approved_detail(self, card):
+        """直接导航日志 URL；只清理本次创建的标签，仍走原有详情/按钮核验。"""
+        if self.platform == '51job':
+            raise AdapterError('51job 暂不支持批准投递')
+        if parse_job_id(self.platform, card.get('url')) != card['job_id']:
+            raise AdapterError('日志详情 URL 与批准岗位 ID 不匹配')
+        self.close_detail()
+        self.current = card
+        tab = self.browser.new_tab()
+        self.detail_tab = tab
+        self.owned_details[tab.tab_id] = tab
+        tab.get(card['url'])
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            status, reason = self.check()
+            if status:
+                return {'gate': status, 'reason': reason}
+            result = self.detail_snapshot()
+            if same_job(card, result) and result.get('jd'):
+                result['button_state'] = self.button_state(card)
+                result['button_ready'] = self.verified_button(card) is not None
+                return result
+            time.sleep(.5)
+        return self.detail_snapshot()
+
     def opened_by_search(self, tab):
         # 不把同时由用户或其他任务打开的标签当成本轮资产。
         info = tab.run_cdp('Target.getTargetInfo', targetId=tab.tab_id)['targetInfo']
         return info.get('openerId') == self.search_tab.tab_id
 
     def detail_snapshot(self):
-        tab = self.search_tab if self.platform == 'yupao' else self.detail_tab
+        approved = getattr(self.args, 'approved', False)
+        tab = self.action_tab if approved else self.search_tab if self.platform == 'yupao' else self.detail_tab
         if tab is None:
             return {}
         if self.platform == 'yupao':
@@ -294,7 +322,7 @@ class PlatformAdapter:
                 return {title:text('h1'),jd:text('.afghh'),company:text('.afgec')||text('.afiag'),
                   href:r?.querySelector('a[href*="/zhaogong/"]')?.href||''};
             ''') or {}
-            data['job_id'] = parse_job_id('yupao', data.get('href', ''))
+            data['job_id'] = parse_job_id('yupao', tab.url if approved else data.get('href', ''))
         else:
             data = tab.run_js('''
                 const text=s=>document.querySelector(s)?.innerText.trim()||'';
@@ -306,7 +334,10 @@ class PlatformAdapter:
             if self.platform == 'liepin':
                 # .company-name 可落在推荐岗位，不能拿它补当前雇主。当前公司只取搜索卡片。
                 data['company'] = ''
-        data['url'] = safe_url(tab.url) if self.platform != 'yupao' else safe_url(data.get('href', ''))
+        # 批准模式每次快照都核对当前 URL，重定向不能沿用日志身份。
+        if approved:
+            data['job_id'] = parse_job_id(self.platform, tab.url)
+        data['url'] = safe_url(tab.url) if approved or self.platform != 'yupao' else safe_url(data.get('href', ''))
         return data
 
     def _button(self, card):

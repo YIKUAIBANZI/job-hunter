@@ -78,6 +78,32 @@ Jev 将**脱敏简历、求职偏好、职位标题/公司和完整 JD**发送�
 
 新平台缓存按平台、简历/偏好/问题/阈值版本摘要隔离，更新材料自动失效；`--refresh` 强制重评。命中 7 天缓存的复核/跳过不再打开详情；真实提交前仍需读取当前详情、核对身份并重新检查 JD。缓存不写简历和 JD 原文。
 
+## 人工复核与批准投递
+
+先离线汇总日志中的 `review`，人工看过岗位后将对应行的 `[ ]` 改为 `[x]`（也识别 `[X]`）：
+
+```bash
+python3 review_list.py             # 全部城市
+python3 review_list.py --city 深圳  # 仅该城市
+```
+
+`复核清单.md` 按平台分节、按时间倒序，平台+ID 去重取最新记录。重新生成保留仍在清单中的勾选；任意城市日志中已 `applied/pending` 的 ID 自动剔除。旧 BOSS 记录缺少时间时，同 ID 按日志最后一条处理。清单属于个人投递资料，已加入 `.gitignore`；每轮覆盖的 `<平台>-<城市>-队列.md` 仍只用于查看本轮结论。
+
+已批准后可运行以下命令；此处仅说明用法，**本阶段仅离线测试，未实投验证批准路径**：
+
+```bash
+python3 boss_apply.py --approved --city 深圳 --count 1
+python3 liepin_apply.py --approved --city 深圳 --count 1
+# 鱼泡尚未校准，仍需锁定已勾选 ID，授权后只尝试一次
+python3 yupao_apply.py --approved --city 深圳 --calibrate --count 1 --job-id 已确认的数字职位ID
+```
+
+`--approved` 不需要 `--job`，只处理该平台、该城市日志中且在清单打勾的 ID；URL 和标题以日志为准，修改清单链接不会改变导航目标。不搜索列表、不读匹配缓存、不调用 Jev，也不需要 Jev key 或简历。传 `--dry-run` 可只核对批准详情而不点击。
+
+批准仅替代匹配判断：冷却、风控、黑名单、ID/公司去重、详情上限、沟通间隔和每五次成功休息仍生效；BOSS 批准模式拒绝 `--fast/--ignore-cooldown`，批准模式均不接受 `--fill-queue`。提交前先落盘 `pending`，未知结果停止且防重；成功记录 `applied`，原因以 `[人工批准]` 开头，下次生成清单时移除。
+
+BOSS 直接打开日志详情 URL，点击前复核 URL 中的 ID、`.job-banner .name h1`（或 `h1`）与日志标题完全一致，并核对 `a.btn-startchat` 的 `data-url` 前缀与“立即沟通”文本；“继续沟通”记已沟通并跳过。猎聘、鱼泡复用 `same_job`、详情按钮核验和原生提交。未知详情结构进入复核，不点击。**51job 清单批准列为 `—`，`--approved` 直接报错，请在页面手动处理；未校准平台的首单门禁不变。**
+
 ## 首单校准与结果
 
 已校准平台见 `platform_adapters.CALIBRATED`：猎聘已完成两次首单（`open-chat` 返回 `flag=1` + 按钮变“继续聊”）；51job、鱼泡尚未校准（鱼泡 1 次仅页面证据），普通真实批量运行会在连接浏览器前停止。**真实投递须先征得用户对该平台和岗位的明确授权**，随后仅运行一份：
@@ -94,6 +120,7 @@ python3 liepin_apply.py --job "AI产品经理" --city 深圳 --experience 实习
 
 - `<平台>-<城市>-log.json`：applied/pending/review/skipped/failed；风控为 `failed` 下 `status=blocked`。点击后风控仍保留 pending 防重。
 - `<平台>-<城市>-队列.md`：本轮推荐、复核、跳过、数量和停止原因。推荐不等于投递成功。
+- `复核清单.md`：离线汇总待人工复核岗位，保留用户批准勾选。
 - `<平台>-cooldown.json`：冷却截止时间。
 - `jev-<平台>-cache.json`：新平台缓存；BOSS 保留 `jev-cache.json`。
 
@@ -123,6 +150,7 @@ BOSS 与新平台共用节奏常量、日志原子写入、平台 ID 索引和�
 - `platform_runner.py`：匹配、缓存、去重、队列、运行上限、提交状态。
 - `platform_adapters.py`：搜索筛选、DOM 卡片、详情、按钮与标签生命周期。
 - `apply_runtime.py`：节奏、风控、提交预记、监听和证据核验。
+- `review_list.py`：离线复核清单与批准 ID 解析。
 - 三个平台的 `*_apply.py`：保留城市表及 CLI 入口。
 - `official_apply.py`：原有官网入口补全工具，本次未改。
 

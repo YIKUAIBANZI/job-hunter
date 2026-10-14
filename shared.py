@@ -160,7 +160,7 @@ def parse_common_args(
     argv 仅供测试注入，正常运行传 None 走 sys.argv。
     """
     p = argparse.ArgumentParser()
-    p.add_argument("--job", required=True, help="搜索岗位名")
+    p.add_argument("--job", default="", help="搜索岗位名（--approved 时不需要）")
     p.add_argument(
         "--city", default=default_city, help=f"城市，可选: {list(city_codes)}"
     )
@@ -174,6 +174,7 @@ def parse_common_args(
     p.add_argument("--dry-run", action="store_true", help="仅 Boss：只读 JD 和打分，不沟通")
     p.add_argument("--fast", action="store_true", help="仅 Boss 调试：沟通间隔降至 3–6 秒")
     if include_matcher:
+        p.add_argument("--approved", action="store_true", help="仅投递复核清单中人工批准的岗位，不搜索、不调 Jev")
         p.add_argument("--max-views", type=int, default=60, help="Boss 单轮详情打开次数上限（默认 60）")
         p.add_argument("--refresh", action="store_true", help="Boss 绕过匹配缓存，重新打开详情并评分")
         p.add_argument("--fill-queue", action="store_true", help="Boss Jev 投满后继续评完当前批次，补充队列")
@@ -186,7 +187,15 @@ def parse_common_args(
         p.add_argument("--experience", default="在校生,应届生,经验不限",
                        help="Boss 工作经验，逗号分隔，如 在校生,应届生（空=不限）")
         p.add_argument("--degree", default="", help="Boss 学历要求，逗号分隔，如 本科,大专（空=不限）")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if not args.job and not getattr(args, 'approved', False):
+        p.error('必须提供 --job，或使用 --approved')
+    if getattr(args, 'approved', False):
+        if args.count < 1 or args.max_views < 1:
+            p.error('count 和 max-views 必须为正数')
+        if args.ignore_cooldown or args.fast or args.fill_queue:
+            p.error('--approved 不支持 ignore-cooldown、fast 或 fill-queue')
+    return args
 
 
 # ---------- 日志写入 ----------

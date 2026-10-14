@@ -464,3 +464,200 @@ def test_product_title_bypasses_title_prefilter(harness):
     h = harness([card("a", tags=["数据标注/AI训练师"])], title_responses=[{"choice": "1", "probabilities": {"1": 0.9, "0": 0.1}}], protect=True)
     h.run("--dry-run")
     assert h.title_calls == [] and h.page.opened == ["a"] and len(h.calls) == 1
+
+
+@pytest.fixture
+def approved_boss(monkeypatch, tmp_path):
+    """详情页替身跑真实 start_chat，原生点击时读盘验证 pending 顺序。"""
+    import socket
+    from review_list import REVIEW_FILE, render_review_list
+
+    events, rests, navigations, clicked = [], [], [], []
+    state = dict(title='产品实习', text='立即沟通', data_url='/wapi/zpgeek/friend/add.json?x=1',
+                 code=0, blocked='', redirect='', explode=False, stale=False)
+    log_file = tmp_path / 'boss-深圳-log.json'
+
+    def forbidden(*a, **kw):
+        pytest.fail('批准模式禁止 Jev、搜索和真实浏览器/网络连接')
+
+    for name in ('load_jev_key', 'match_title', 'match_job', 'latest_match', 'build_search_url'):
+        monkeypatch.setattr(boss, name, forbidden)
+    monkeypatch.setattr(socket, 'create_connection', forbidden)
+    monkeypatch.setattr(socket.socket, 'connect', forbidden)
+    monkeypatch.setattr(jev.request, 'urlopen', forbidden)
+
+    class Listener:
+        def start(self, target):
+            assert target == boss.CHAT_TARGET
+            events.append('listen')
+            self.sent = False
+            if state['stale']:
+                state['title'] = '另一岗位'
+
+        def wait(self, **kwargs):
+            if self.sent or state['code'] is None:
+                return None
+            self.sent = True
+            return SimpleNamespace(url='https://www.zhipin.com/wapi/zpgeek/friend/add.json',
+                                   response=SimpleNamespace(status=200, body={'code': state['code']}))
+
+        def stop(self):
+            events.append('stop')
+
+    class Button:
+        @property
+        def text(self):
+            return state['text']
+
+        def attr(self, name):
+            return state['data_url'] if name == 'data-url' else None
+
+        def click(self, **kwargs):
+            assert kwargs == {'by_js': False}
+            job_id = boss.parse_boss_job_id(page.url)
+            assert any(r['job_id'] == job_id for r in load_log(log_file)['pending'])
+            events.append('click')
+            clicked.append(job_id)
+            if state['explode']:
+                raise RuntimeError('断连')
+
+    class Page:
+        url = ''
+        listen = Listener()
+
+        def new_tab(self):
+            return self
+
+        def get(self, url):
+            navigations.append(url)
+            self.url = state['redirect'] or url
+
+        def run_js(self, script, *a):
+            if '.job-banner .name h1' in script:
+                return state['title']
+            if 'const d = document.querySelector' in script:
+                return False
+            if 'cancel-btn' in script:
+                return None
+            forbidden()
+
+        def ele(self, selector, **kwargs):
+            assert selector == 'css:a.btn-startchat'
+            return Button()
+
+        def close(self):
+            events.append('close')
+
+    page = Page()
+    monkeypatch.setattr(boss, '__file__', str(tmp_path / 'boss_apply.py'))
+    monkeypatch.setattr(boss, 'load_config', lambda: dict(DEFAULT_CONFIG))
+    monkeypatch.setattr(boss, 'connect_chrome', lambda: events.append('connect') or page)
+    monkeypatch.setattr(boss, 'page_block_reason', lambda p: state['blocked'])
+    execute = boss.run_approved
+
+    def rest(interval, check):
+        rests.append(interval)
+        check()
+
+    monkeypatch.setattr(boss, 'run_approved', lambda a, c, r: execute(a, c, r, rest=rest))
+
+    def seed(ids=('a', 'b', 'c'), approved=('a', 'b'), **overrides):
+        rows = [dict(platform='boss', job_id=i, job='产品实习', company=f'公司{i}',
+                     url=f'https://www.zhipin.com/job_detail/{i}.html', **overrides) for i in ids]
+        log_file.write_text(json.dumps({'review': rows}))
+        (tmp_path / REVIEW_FILE).write_text(render_review_list(rows, {f'boss:{i}' for i in approved}))
+
+    def run(*flags):
+        monkeypatch.setattr(sys, 'argv', ['boss_apply.py', '--approved', '--city', '深圳', *flags])
+        return boss.main()
+
+    seed()
+    return SimpleNamespace(run=run, seed=seed, state=state, page=page, events=events,
+                           clicked=clicked, rests=rests, navigations=navigations,
+                           log=lambda: load_log(log_file))
+
+
+def test_approved_boss_only_checked_ids_count_dedup_and_no_jev(approved_boss):
+    h = approved_boss
+    h.run('--count', '1')
+    assert h.clicked == ['a']
+    assert h.navigations == ['https://www.zhipin.com/job_detail/a.html']
+    h.run('--count', '5')
+    assert h.clicked == ['a', 'b']
+    assert len(h.log()['applied']) == 2 and not h.log()['pending']
+    assert all(r['reason'].startswith('[人工批准]') and r['evidence']['packets'] for r in h.log()['applied'])
+    h.run()
+    assert h.clicked == ['a', 'b']
+
+
+@pytest.mark.parametrize('field,value,reason', [
+    ('redirect', 'https://www.zhipin.com/job_detail/other.html', 'URL'),
+    ('redirect', 'https://zhipin.com.evil.test/job_detail/a.html', 'URL'),
+    ('title', '别的岗位', '标题'),
+    ('data_url', '/unverified/submit', '接口路径'),
+    ('stale', True, '标题'),
+])
+def test_approved_boss_identity_failure_no_click(approved_boss, field, value, reason):
+    h = approved_boss
+    h.seed(ids=('a',), approved=('a',))
+    h.state[field] = value
+    h.run()
+    assert not h.clicked and not h.log()['pending']
+    assert reason in h.log()['review'][-1]['reason']
+
+
+def test_approved_boss_continue_chat_skipped(approved_boss):
+    h = approved_boss
+    h.state['text'] = '继续沟通'
+    h.run()
+    assert not h.clicked and len(h.log()['skipped']) == 2
+    assert all(r['reason'] == '已沟通' for r in h.log()['skipped'])
+
+
+def test_approved_boss_cooldown_never_connects(approved_boss, tmp_path):
+    (tmp_path / 'boss-cooldown.json').write_text(json.dumps({
+        'until': (datetime.now().astimezone() + timedelta(hours=1)).isoformat()}))
+    with pytest.raises(SystemExit) as exc:
+        approved_boss.run()
+    assert exc.value.code == 2 and not approved_boss.events
+
+
+@pytest.mark.parametrize('explode', [False, True])
+def test_approved_boss_unknown_retains_pending_and_stops(approved_boss, explode):
+    h = approved_boss
+    h.state.update(code=None, explode=explode)
+    h.run()
+    assert h.clicked == ['a'] and len(h.log()['pending']) == 1
+    assert not h.log()['applied']
+    h.run()
+    assert h.clicked == ['a', 'b']
+
+
+def test_approved_boss_dry_run_and_view_cap(approved_boss):
+    h = approved_boss
+    h.run('--dry-run', '--max-views', '1')
+    assert len(h.navigations) == 1 and not h.clicked and not h.log()['pending']
+
+
+def test_approved_boss_pacing_and_success_rest(approved_boss):
+    h = approved_boss
+    h.seed(ids=tuple('abcdef'), approved=tuple('abcdef'))
+    h.run('--count', '5')
+    assert h.clicked == list('abcde')
+    assert h.rests == [boss.VIEW_INTERVAL, boss.CHAT_INTERVAL] * 5 + [boss.SUCCESS_REST]
+
+
+def test_approved_boss_no_pending_callback_no_submit(approved_boss):
+    h = approved_boss
+    h.page.url = 'https://www.zhipin.com/job_detail/a.html'
+    status, reason, _, clicked = boss.start_chat(h.page, 'a', detail_title='产品实习')
+    assert status == 'review' and 'pending' in reason and not clicked and not h.clicked
+
+
+def test_approved_boss_blocked_stops_before_click(approved_boss, tmp_path):
+    h = approved_boss
+    h.state['blocked'] = '验证码'
+    with pytest.raises(SystemExit):
+        h.run()
+    assert not h.clicked and (tmp_path / 'boss-cooldown.json').exists()
+    assert h.log()['failed'][-1]['status'] == 'blocked'

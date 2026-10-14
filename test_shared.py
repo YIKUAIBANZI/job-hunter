@@ -266,6 +266,17 @@ def test_parse_common_args_requires_job():
         parse_common_args(CITY_CODES, default_count=20, default_min_score=60, argv=[])
 
 
+def test_parse_approved_without_search_job():
+    args = parse_common_args(CITY_CODES, include_matcher=True, argv=['--approved'])
+    assert args.approved and not args.job
+
+
+@pytest.mark.parametrize('flags', [['--ignore-cooldown'], ['--fast'], ['--fill-queue'], ['--count', '0'], ['--max-views', '0']])
+def test_parse_approved_keeps_cooldown_pacing_and_limits(flags):
+    with pytest.raises(SystemExit):
+        parse_common_args(CITY_CODES, include_matcher=True, argv=['--approved', *flags])
+
+
 # ---------- record ----------
 
 

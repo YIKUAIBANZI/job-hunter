@@ -10,7 +10,8 @@ import jev_match as jev
 from apply_runtime import (CHAT_INTERVAL, SUCCESS_REST, SUCCESS_REST_EVERY,
                            PLATFORM_PACING,
                            paced_rest, submit, write_cooldown)
-from platform_adapters import AdapterError, PlatformAdapter, same_job
+from platform_adapters import AdapterError, PlatformAdapter, same_job, parse_job_id
+from review_list import approved_review_rows
 from shared import (connect_chrome, cooldown_remaining, dedup_key, is_blacklisted,
                     load_applied_index, load_config, load_log, record, save_log, score_jd)
 
@@ -21,7 +22,8 @@ class StopRun(Exception):
 
 def parse_args(city_codes, argv=None, *, platform='liepin', default_count=20, default_min_score=60):
     p = argparse.ArgumentParser(description='点击 + 核验：默认 Jev；先运行 --dry-run')
-    p.add_argument('--job', required=True)
+    p.add_argument('--job', default='', help='搜索岗位名（--approved 时不需要）')
+    p.add_argument('--approved', action='store_true', help='只投递复核清单中本平台的人工批准岗位，不搜索、不调 Jev')
     p.add_argument('--job-id', default='', help='仅处理指定职位 ID；首单授权时锁定岗位')
     p.add_argument('--city', default='深圳', choices=list(city_codes))
     p.add_argument('--count', type=int, default=default_count, help='真投成功目标；dry-run 最多评估岗位数')
@@ -40,6 +42,12 @@ def parse_args(city_codes, argv=None, *, platform='liepin', default_count=20, de
     p.add_argument('--fill-queue', action='store_true')
     p.add_argument('--calibrate', action='store_true', help='用户授权后仅真投 1 次，采集首单核验证据')
     args = p.parse_args(argv)
+    if args.approved and platform == '51job':
+        p.error('51job 暂不支持批准投递，请在页面手动处理')
+    if not args.job and not args.approved:
+        p.error('必须提供 --job，或使用 --approved')
+    if args.approved and args.fill_queue:
+        p.error('--approved 不支持 --fill-queue')
     if not 0 <= args.min_score <= 100:
         p.error('min-score 为 0–100')
     if args.count < 1 or not 1 <= args.max_views <= 60 or not 1 <= args.max_pages <= 20:
@@ -108,9 +116,17 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
         remaining = cooldown_remaining(cooldown_file, datetime.now().astimezone())
         if remaining:
             raise StopRun(f'风控冷却中，剩余 {int(remaining.total_seconds()/60)+1} 分钟；未连接浏览器')
+        if args.approved and platform == '51job':
+            raise StopRun('51job 暂不支持批准投递，请在页面手动处理')
         if not args.dry_run and not adapter.calibrated and not args.calibrate:
             raise StopRun('该平台尚未首单校准；请先 dry-run，用户授权后 --calibrate --count 1')
-        if args.matcher == 'jev':
+        approved_cards = []
+        if args.approved:
+            approved_cards = [{**r, 'title': r.get('job', ''), 'review_entry': r}
+                              for r in approved_review_rows(root, platform, args.city)]
+            if not approved_cards:
+                raise StopRun('没有本城市可投递的人工批准岗位，未连接浏览器')
+        if not args.approved and args.matcher == 'jev':
             key = jev.load_jev_key()
             if not key:
                 raise StopRun('缺少 JEV_API_KEY，不降级、不连接浏览器')
@@ -124,13 +140,14 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                     raise ValueError('空简历')
             except (OSError, UnicodeError, ValueError):
                 raise StopRun('简历不可读：请配置 UTF-8 文本简历') from None
-        scope = cache_scope(platform, cfg, resume, profile)
-        adapter.search()
+        scope = '' if args.approved else cache_scope(platform, cfg, resume, profile)
+        if not args.approved:
+            adapter.search()
         check()
         page = 1
         while page <= args.max_pages:
             check()
-            cards = adapter.cards()
+            cards = approved_cards if args.approved else adapter.cards()
             fresh = [c for c in cards if (c['job_id'] or ('missing', c['title'])) not in seen]
             if not cards:
                 raise StopRun('没有读取到职位卡片：可能未登录、列表为空或页面结构变化')
@@ -146,7 +163,8 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                     raise StopRun('已达投递目标')
                 check()
                 seen.add(card['job_id'] or ('missing', card['title']))
-                current = entry = {'platform': platform, 'job_id': card['job_id'], 'job': card['title'],
+                current = entry = {**card.get('review_entry', {}),
+                                  'platform': platform, 'job_id': card['job_id'], 'job': card['title'],
                                   'company': card.get('company', ''), 'salary': card.get('salary', ''),
                                   'url': card.get('url', '')}
                 rows.append(entry)
@@ -161,15 +179,18 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                 if is_blacklisted(entry['company'], cfg):
                     decision(entry, 'skip', '公司黑名单')
                     continue
+                if args.approved and parse_job_id(platform, entry['url']) != card['job_id']:
+                    decision(entry, 'review', '日志详情 URL 与批准岗位 ID 不匹配')
+                    continue
                 counts['evaluated'] += 1
                 cache_id = scope + ':' + card['job_id']
                 try:
-                    cached = None if args.refresh or args.matcher != 'jev' else jev.latest_match(cache_id, cache_file)
+                    cached = None if args.approved or args.refresh or args.matcher != 'jev' else jev.latest_match(cache_id, cache_file)
                     if cached:
                         result = cached
                         entry['cache_hit'] = True
                     else:
-                        if args.matcher == 'jev':
+                        if not args.approved and args.matcher == 'jev':
                             excluded = next((kw for kw in cfg['exclude_keywords'] if kw and kw.lower() in card['title'].lower()), '')
                             if excluded:
                                 decision(entry, 'skip', f'标题排除词：{excluded}')
@@ -190,7 +211,7 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                             decision(entry, 'review', '已达详情上限，尚未评估')
                             raise StopRun('已达 --max-views 上限')
                         counts['views'] += 1
-                        detail = adapter.open_detail(card)
+                        detail = adapter.open_approved_detail(card) if args.approved else adapter.open_detail(card)
                         check()
                         rest(pacing['view_interval'], check)
                         if counts['views'] % pacing['view_rest_every'] == 0:
@@ -217,16 +238,20 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                         if company_key and company_key in index:
                             decision(entry, 'skip', '详情公司与已投岗位重复')
                             continue
-                        jd = jev.clean_jd(card.get('tags', '') + '\n' + detail['jd'])
-                        score, why = score_jd(card['title'], jd, cfg)
-                        entry['keyword_score'] = score
-                        if args.matcher == 'jev':
-                            state = jev.build_state(card['title'], entry['company'], jd, resume, profile)
-                            result = jev.match_job(cache_id, jd, state, key, cache_file, refresh=args.refresh)
+                        if args.approved:
+                            result = {'decision': {'decision': 'apply', 'reason': '人工批准复核岗位'}}
                         else:
-                            result = {'decision': {'decision': 'apply' if score >= args.min_score else 'skip', 'reason': why}}
+                            jd = jev.clean_jd(card.get('tags', '') + '\n' + detail['jd'])
+                            score, why = score_jd(card['title'], jd, cfg)
+                            entry['keyword_score'] = score
+                            if args.matcher == 'jev':
+                                state = jev.build_state(card['title'], entry['company'], jd, resume, profile)
+                                result = jev.match_job(cache_id, jd, state, key, cache_file, refresh=args.refresh)
+                            else:
+                                result = {'decision': {'decision': 'apply' if score >= args.min_score else 'skip', 'reason': why}}
                     failures = 0
-                    entry['jev'] = result if args.matcher == 'jev' else {}
+                    if not args.approved:
+                        entry['jev'] = result if args.matcher == 'jev' else {}
                     d = effective_decision(result, args.match_policy)
                     decision(entry, d['decision'], d['reason'])
                     if args.dry_run or d['decision'] != 'apply' or counts['applied'] >= args.count:
@@ -248,6 +273,8 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                         counts['pending'] += 1
 
                     status, reason, evidence = submit(adapter, card, before_click, dry_run=args.dry_run)
+                    if args.approved and status == 'applied':
+                        reason = '[人工批准]' + reason
                     entry.update(status=status, reason=reason, evidence=evidence)
                     if evidence['attempted']:
                         # 替换预记；一次原子写入同时完成移出 pending 与写入最终状态。
@@ -279,7 +306,7 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                         raise StopRun('Jev 连续失败 3 次')
                 finally:
                     adapter.close_detail()
-            if args.fill_queue and counts['applied'] >= args.count:
+            if args.approved or args.fill_queue and counts['applied'] >= args.count:
                 break
             page += 1
             if page > args.max_pages:
@@ -313,6 +340,11 @@ def main(platform, city_codes, argv=None):
                       default_count=cfg['default_count'], default_min_score=cfg['min_score'])
     # 延迟连接：冷却、配置和校准门禁检查在 execute 里先于 search 完成。
     class LazyAdapter(PlatformAdapter):
+        def open_approved_detail(self, card):
+            if self.browser is None:
+                self.browser = connect_chrome()
+            return super().open_approved_detail(card)
+
         def search(self, page=1):
             if self.browser is None:
                 self.browser = connect_chrome()

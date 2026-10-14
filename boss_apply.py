@@ -9,7 +9,9 @@ from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
 from apply_runtime import (CHAT_INTERVAL, SUCCESS_REST_EVERY, SUCCESS_REST,
-                           VIEW_INTERVAL, VIEW_REST_EVERY, VIEW_REST)
+                           VIEW_INTERVAL, VIEW_REST_EVERY, VIEW_REST,
+                           paced_rest, write_cooldown)
+from review_list import approved_review_rows
 
 from platform_runner import effective_decision
 from jev_match import (
@@ -37,8 +39,10 @@ from shared import (
     load_config,
     load_log,
     parse_common_args,
+    parse_boss_job_id,
     print_summary,
     record,
+    save_log,
     score_jd,
 )
 
@@ -206,7 +210,34 @@ def wait_chat_response(page, evidence):
     return status, reason
 
 
-def start_chat(page, job_id):
+def boss_detail_url(url, job_id):
+    p = urlsplit(url)
+    return (p.scheme in ('http', 'https') and
+            (p.hostname == 'zhipin.com' or (p.hostname or '').endswith('.zhipin.com'))
+            and parse_boss_job_id(url) == job_id)
+
+
+def detail_chat_button(page, job_id, title):
+    """详情页点击前重新核对 URL、标题和按钮的明确接口路径。"""
+    if not boss_detail_url(page.url, job_id):
+        return None, 'review', '详情 URL 与批准岗位 ID 不匹配'
+    current_title = page.run_js('''
+        const h=document.querySelector('.job-banner .name h1') || document.querySelector('h1');
+        return h ? h.textContent.trim() : '';
+    ''') or ''
+    if not title.strip() or current_title.strip() != title.strip():
+        return None, 'review', '详情标题与日志岗位不匹配'
+    button = page.ele('css:a.btn-startchat', timeout=1)
+    if button and button.text.strip() == '继续沟通':
+        return None, 'skipped', '已沟通'
+    if (not button or button.text.strip() != '立即沟通'
+            or not (button.attr('data-url') or '').startswith('/wapi/zpgeek/friend/add.json')
+            or button.attr('disabled') is not None or button.attr('aria-disabled') == 'true'):
+        return None, 'review', '详情沟通按钮不存在、不可用或接口路径不匹配'
+    return button, '', ''
+
+
+def start_chat(page, job_id, *, detail_title=None, before_click=None):
     """先监听再点击；点击结果或核验过程异常时保守记 pending，避免重复提交。"""
     evidence = {"target": CHAT_TARGET, "packets": []}
     clicked = False
@@ -215,16 +246,30 @@ def start_chat(page, job_id):
     try:
         page.listen.start(CHAT_TARGET)
         listening = True
-        # JS 执行若异常，无法证明点击未发生，按已尝试处理。
-        clicked = True
-        # 按钮 ka="cpc_job_list_chat_<job_id>"，点击前再核一次是不是当前岗位
-        result = page.run_js("""
+        if detail_title is not None:
+            button, status, reason = detail_chat_button(page, job_id, detail_title)
+            if button is None:
+                result = 'unavailable'
+            # 批准模式只接受已持久化的 pending；不提供无预记的详情提交路径。
+            elif before_click is None:
+                status, reason = 'review', '缺少提交前 pending 预记，未点击'
+                result = 'unavailable'
+            else:
+                before_click()
+                clicked = True
+                button.click(by_js=False)
+                result = 'clicked'
+        else:
+            # JS 执行若异常，无法证明点击未发生，按已尝试处理。
+            clicked = True
+            # 按钮 ka="cpc_job_list_chat_<job_id>"，点击前再核一次是不是当前岗位
+            result = page.run_js("""
             const b = document.querySelector('.op-btn-chat');
             if (!b || b.classList.contains('is-disabled') || b.disabled) return 'disabled';
             if (!(b.getAttribute('ka') || '').endsWith(arguments[0])) return 'mismatch';
             b.click();
             return 'clicked';
-        """, job_id)
+            """, job_id)
         clicked = result == "clicked"
         if clicked:
             status, reason = wait_chat_response(page, evidence)
@@ -237,6 +282,8 @@ def start_chat(page, job_id):
             if confirmed and status == "pending":
                 status, reason = "chat_started", "页面弹窗确认"
             page.run_js("const c=document.querySelector('.greet-boss-container .cancel-btn'); if(c) c.click();")
+        elif result == 'unavailable':
+            pass
         elif result == "mismatch":
             reason = "沟通按钮不属于当前岗位，未点击"
         else:
@@ -263,6 +310,119 @@ def start_chat(page, job_id):
     return status, reason, evidence, clicked
 
 
+def run_approved(args, cfg, root, *, rest=paced_rest):
+    """只打开日志中的批准详情，提交核验仍由 start_chat 完成。"""
+    log_file = root / f'boss-{args.city}-log.json'
+    cooldown_file = root / 'boss-cooldown.json'
+    log, index = load_log(log_file), load_applied_index(root)
+    counts = dict(applied=0, pending=0, skipped=0, views=0)
+    page = None
+    current = {'platform': 'boss'}
+
+    def persist(bucket, entry):
+        record(log, log_file, bucket, {**entry, 'ts': datetime.now().astimezone().isoformat()})
+
+    def check():
+        reason = page_block_reason(page)
+        if reason:
+            write_cooldown(cooldown_file, reason)
+            persist('failed', {**current, 'status': 'blocked', 'reason': reason})
+            raise SystemExit(1)
+
+    try:
+        # 此函数也可直接测试；不能依赖调用者跳过冷却检查。
+        if cooldown_remaining(cooldown_file, datetime.now().astimezone()):
+            print('Boss 风控冷却中，未连接浏览器。')
+            raise SystemExit(2)
+        candidates = approved_review_rows(root, 'boss', args.city)
+        if not candidates:
+            print('没有本城市可投递的 BOSS 人工批准岗位。')
+            return counts
+        browser = connect_chrome()
+        page = browser.new_tab()
+        for source in candidates:
+            if (counts['applied'] >= args.count or counts['views'] >= args.max_views
+                    or args.dry_run and counts['views'] >= args.count):
+                break
+            current = entry = {**source, 'decision': 'apply'}
+            job_id = entry['job_id']
+            id_key = f'boss:{job_id}'
+            company_key = dedup_key(entry.get('company'), entry.get('job')) if entry.get('company') else ''
+            if id_key in index or company_key and company_key in index:
+                persist('skipped', {**entry, 'reason': '已投递或待核验（跨运行去重）'})
+                counts['skipped'] += 1
+                continue
+            if is_blacklisted(entry.get('company', ''), cfg):
+                persist('skipped', {**entry, 'reason': '公司黑名单'})
+                counts['skipped'] += 1
+                continue
+            if not company_key or not boss_detail_url(entry.get('url', ''), job_id):
+                persist('review', {**entry, 'reason': '公司身份缺失或日志详情 URL 与 ID 不匹配'})
+                continue
+            page.get(entry['url'])
+            counts['views'] += 1
+            check()
+            rest(VIEW_INTERVAL, check)
+            if counts['views'] % VIEW_REST_EVERY == 0:
+                rest(VIEW_REST, check)
+            button, status, reason = detail_chat_button(page, job_id, entry.get('job', ''))
+            if button is None:
+                persist('skipped' if status == 'skipped' else 'review', {**entry, 'reason': reason})
+                counts['skipped'] += status == 'skipped'
+                continue
+            if args.dry_run:
+                print(f"[dry-run 核验通过] {entry.get('company')} | {entry.get('job')}")
+                continue
+            check()
+
+            def before_click():
+                persist('pending', {**entry, 'status': 'pending', 'attempted': True,
+                                    'reason': '提交前预记，异常退出时禁止重投'})
+                index.add(id_key)
+                index.add(company_key)
+                counts['pending'] += 1
+
+            status, reason, evidence, clicked = start_chat(
+                page, job_id, detail_title=entry['job'], before_click=before_click)
+            entry.update(status=status, reason=reason, evidence=evidence, attempted=clicked)
+            if clicked:
+                bucket = 'applied' if status == 'chat_started' else 'pending'
+                if bucket == 'applied':
+                    entry['reason'] = '[人工批准]' + reason
+                log['pending'] = [e for e in log['pending'] if e.get('job_id') != job_id]
+                log[bucket].append({**entry, 'ts': datetime.now().astimezone().isoformat()})
+                save_log(log, log_file)
+                if bucket == 'applied':
+                    counts['applied'] += 1
+                    counts['pending'] -= 1
+            elif status != 'blocked':
+                persist('skipped' if status == 'skipped' else 'review', entry)
+                counts['skipped'] += status == 'skipped'
+            if status == 'blocked':
+                write_cooldown(cooldown_file, reason)
+                persist('failed', entry)
+                raise SystemExit(1)
+            if clicked and status != 'chat_started':
+                print('提交结果待核验，已保留 pending，停止本轮。')
+                break
+            if clicked:
+                rest(CHAT_INTERVAL, check)
+                if counts['applied'] % SUCCESS_REST_EVERY == 0:
+                    rest(SUCCESS_REST, check)
+    except Exception as exc:
+        if page is not None:
+            check()
+        persist('review', {**current, 'reason': f'批准投递中断：{type(exc).__name__}；请检查 pending'})
+    finally:
+        if page is not None:
+            try:
+                page.close()
+            except Exception:
+                pass
+        print_summary('Boss直聘（人工批准）', counts['applied'], counts['skipped'], log_file, counts['pending'])
+    return counts
+
+
 def main():
     cfg = load_config()
     args = parse_common_args(
@@ -286,6 +446,9 @@ def main():
             minutes = int(remaining.total_seconds() / 60) + 1
             print(f"🛑 Boss 风控冷却中，剩余约 {minutes} 分钟：{reason}；未连接浏览器。")
             raise SystemExit(2)
+
+    if args.approved:
+        return run_approved(args, cfg, Path(__file__).parent)
 
     log = load_log(log_file)
     applied_index = load_applied_index()
