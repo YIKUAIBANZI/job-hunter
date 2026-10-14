@@ -8,7 +8,7 @@ from pathlib import Path
 
 import jev_match as jev
 from apply_runtime import (CHAT_INTERVAL, SUCCESS_REST, SUCCESS_REST_EVERY,
-                           VIEW_INTERVAL, VIEW_REST, VIEW_REST_EVERY,
+                           PLATFORM_PACING,
                            paced_rest, submit, write_cooldown)
 from platform_adapters import AdapterError, PlatformAdapter, same_job
 from shared import (connect_chrome, cooldown_remaining, dedup_key, is_blacklisted,
@@ -19,7 +19,7 @@ class StopRun(Exception):
     pass
 
 
-def parse_args(city_codes, argv=None, *, default_count=20, default_min_score=60):
+def parse_args(city_codes, argv=None, *, platform='liepin', default_count=20, default_min_score=60):
     p = argparse.ArgumentParser(description='点击 + 核验：默认 Jev；先运行 --dry-run')
     p.add_argument('--job', required=True)
     p.add_argument('--job-id', default='', help='仅处理指定职位 ID；首单授权时锁定岗位')
@@ -30,11 +30,12 @@ def parse_args(city_codes, argv=None, *, default_count=20, default_min_score=60)
     p.add_argument('--min-score', type=int, default=default_min_score)
     p.add_argument('--match-policy', choices=('review-gate', 'boss-b'), default='review-gate',
                    help='默认 Jev 建议复核不自动投；boss-b 保留交接方案 B')
-    p.add_argument('--max-views', type=int, default=60)
+    p.add_argument('--max-views', type=int, default=PLATFORM_PACING[platform]['max_views'],
+                   help='最多读取详情数；51job 默认 20，其他平台默认 60')
     p.add_argument('--max-pages', type=int, default=5)
     p.add_argument('--job-type', default='', help='平台工作类型选项，51job 支持；默认不限')
     p.add_argument('--experience', default='', help='平台经验选项：猎聘 实习生/应届生；51job 在校生/应届生')
-    p.add_argument('--degree', default='', help='51job 学历选项，如 本科；其他平台待校准')
+    p.add_argument('--degree', default='', help='猎聘/51job 学历选项，如 本科；鱼泡不支持')
     p.add_argument('--refresh', action='store_true')
     p.add_argument('--fill-queue', action='store_true')
     p.add_argument('--calibrate', action='store_true', help='用户授权后仅真投 1 次，采集首单核验证据')
@@ -70,6 +71,7 @@ def effective_decision(result, policy):
 
 
 def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
+    pacing = PLATFORM_PACING[platform]
     log_file = root / f'{platform}-{args.city}-log.json'
     queue_file = root / f'{platform}-{args.city}-队列.md'
     cooldown_file = root / f'{platform}-cooldown.json'
@@ -190,9 +192,9 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                         counts['views'] += 1
                         detail = adapter.open_detail(card)
                         check()
-                        rest(VIEW_INTERVAL, check)
-                        if counts['views'] % VIEW_REST_EVERY == 0:
-                            rest(VIEW_REST, check)
+                        rest(pacing['view_interval'], check)
+                        if counts['views'] % pacing['view_rest_every'] == 0:
+                            rest(pacing['view_rest'], check)
                         if detail.get('external'):
                             decision(entry, 'skip', '跳转到外部招聘平台，不在本次投递范围')
                             continue
@@ -307,7 +309,8 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
 
 def main(platform, city_codes, argv=None):
     cfg = load_config()
-    args = parse_args(city_codes, argv, default_count=cfg['default_count'], default_min_score=cfg['min_score'])
+    args = parse_args(city_codes, argv, platform=platform,
+                      default_count=cfg['default_count'], default_min_score=cfg['min_score'])
     # 延迟连接：冷却、配置和校准门禁检查在 execute 里先于 search 完成。
     class LazyAdapter(PlatformAdapter):
         def search(self, page=1):

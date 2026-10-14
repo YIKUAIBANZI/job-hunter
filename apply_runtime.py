@@ -12,6 +12,15 @@ SUCCESS_REST = (180, 300)
 VIEW_INTERVAL = (6, 15)
 VIEW_REST_EVERY = 10
 VIEW_REST = (45, 90)
+_DEFAULT_PACING = {'view_interval': VIEW_INTERVAL, 'view_rest_every': VIEW_REST_EVERY,
+                   'view_rest': VIEW_REST, 'max_views': 60}
+PLATFORM_PACING = {
+    'liepin': dict(_DEFAULT_PACING),
+    'yupao': dict(_DEFAULT_PACING),
+    # 51job 详情风控更敏感，默认降低浏览上限并延长休息。
+    '51job': {**_DEFAULT_PACING, 'view_interval': (15, 30), 'view_rest_every': 5,
+              'view_rest': (90, 180), 'max_views': 20},
+}
 BLOCK_WORDS = ('上限', '频繁', '验证', '异常', '验证码', '操作过快', '访问受限')
 
 
@@ -167,9 +176,10 @@ def submit(adapter, card, before_click, *, dry_run=False, timeout=8):
                 return 'blocked', reason, evidence
             packet = tab.listen.wait(timeout=min(.5, max(.01, deadline-time.monotonic())), raise_err=False)
             if packet:
-                # 只检查同平台请求，排除地图、埋点等第三方响应。
+                # 页面与业务接口可能使用不同域名；同平台埋点仍由精确端点核验排除。
                 host = urlsplit(packet.url).hostname or ''
-                if host == adapter.domain or host.endswith('.' + adapter.domain):
+                domains = getattr(adapter, 'evidence_domains', (adapter.domain,))
+                if any(host == domain or host.endswith('.' + domain) for domain in domains):
                     info = packet_info(packet, card['job_id'], adapter.request_id_aliases(card['job_id'])
                                        if hasattr(adapter, 'request_id_aliases') else ())
                     evidence['packets'].append(info)

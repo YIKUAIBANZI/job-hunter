@@ -1,4 +1,5 @@
 import json
+import socket
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,15 @@ import platform_runner as runner
 import platform_adapters as adapters
 from platform_adapters import build_search_url, parse_job_id, same_job
 from shared import load_applied_index, load_log, load_config
+
+
+@pytest.fixture(autouse=True)
+def offline(monkeypatch):
+    def blocked(*a, **kw): pytest.fail('禁止真实网络或浏览器连接')
+    monkeypatch.setattr(socket, 'create_connection', blocked)
+    monkeypatch.setattr(socket.socket, 'connect', blocked)
+    monkeypatch.setattr(runner, 'connect_chrome', blocked)
+    monkeypatch.setattr(runner.jev.request, 'urlopen', blocked)
 
 
 @pytest.mark.parametrize('platform,url,expected', [
@@ -223,6 +233,7 @@ def test_jev_failure_stops_three(tmp_path,monkeypatch):
     monkeypatch.setattr(runner.jev,'load_jev_key',lambda:'test-key')
     def fail(*a,**k): raise runner.jev.JevError('failed')
     monkeypatch.setattr(runner.jev,'match_title',fail)
+    monkeypatch.setattr(runner.jev,'match_job',fail)  # 实习标题受保护，可能直接进入 JD 匹配
     a=args('--dry-run','--count','5','--matcher','jev')
     stats=runner.execute('liepin',a,cfg,FakeAdapter(),tmp_path,rest=lambda *a:None)
     assert stats['review']==3 and '3' in stats['stop_reason']
@@ -378,3 +389,193 @@ def test_only_liepin_calibrated_and_alias_scoped():
     a.platform='yupao'
     assert a.request_id_aliases('1975191697')==set()
     assert adapters.CALIBRATED=={'liepin'}
+
+
+@pytest.mark.parametrize('platform,urls', [
+    ('yupao', ('https://yupaowang.com/submit', 'https://yupao-prod.yupaowang.com/submit',
+               'https://www.yupao.com/submit', 'https://snssdk.yupaowang.com/analytics')),
+    ('liepin', ('https://liepin.com/submit', 'https://api-c.liepin.com/submit')),
+])
+@pytest.mark.parametrize('verified', [False, True])
+def test_evidence_domains_capture_and_classify(checks, monkeypatch, platform, urls, verified):
+    events=[]
+    adapter=SubmitAdapter(events,ui=False)
+    real=adapters.PlatformAdapter(platform,None,SimpleNamespace(),'123')
+    adapter.domain,adapter.evidence_domains=real.domain,real.evidence_domains
+    adapter.verified_endpoints={urls[0]:0} if verified else {}
+    packets=[SimpleNamespace(url=url+'?jobId=1&token=SECRET',
+                             request=SimpleNamespace(postData='jobId=1'),
+                             response=SimpleNamespace(status=200,body={'code':0})) for url in urls]
+    other_urls=['https://third.test/track?token=SECRET',
+                f'https://evil{real.domain}/track', f'https://{real.domain}.evil.test/track',
+                'https://yupaowang.com.evil.test/track', 'https://evilyupaowang.com/track']
+    if platform=='liepin': other_urls.append('https://yupao-prod.yupaowang.com/submit')
+    packets.extend(SimpleNamespace(url=url) for url in other_urls)
+    adapter.action_tab=SimpleNamespace(listen=Listener(events,packets))
+    # 固定时钟，不等待真实时间；留足监听轮次收取所有假包。
+    ticks=iter(range(1000))
+    monkeypatch.setattr(rt.time,'monotonic',lambda:next(ticks)/100)
+    classified=[]
+    classify=rt.classify_response
+    def capture(info,endpoints):
+        classified.append(info['url'])
+        return classify(info,endpoints)
+    monkeypatch.setattr(rt,'classify_response',capture)
+    status,_,evidence=rt.submit(adapter,{'job_id':'1'},lambda:events.append('persist'),timeout=1)
+    assert status==('applied' if verified else 'pending')
+    assert classified==list(urls)==[info['url'] for info in evidence['packets']]
+    assert all(info['correlated'] for info in evidence['packets'])
+    assert evidence['other_urls']==[url.split('://',1)[1].split('?',1)[0] for url in other_urls]
+    assert 'SECRET' not in json.dumps(evidence)
+    assert events==['listen','persist','click','stop']
+
+
+class FilterElement:
+    def __init__(self,events,name,visible=True):
+        self.events,self.name=events,name
+        self.states=SimpleNamespace(has_rect=visible)
+    def click(self,**kw):
+        assert kw=={'by_js':False}
+        self.events.append(self.name)
+
+
+class DegreeTab:
+    def __init__(self,events,value,options,*,control=True,selected=True):
+        self.events,self.value,self.options=events,value,options
+        self.control=FilterElement(events,'open') if control else None
+        self.selected=selected
+    def ele(self,selector,**kw):
+        assert selector==('xpath://span[contains(@class,"ant-select-selection-placeholder") and text()="学历"]'
+                          '/ancestor::div[contains(@class,"ant-select-selector")][1]')
+        return self.control
+    def eles(self,selector,**kw):
+        assert selector==f'css:div.ant-select-item-option[title="{self.value}"]'
+        assert self.events==['open',1.5]
+        return self.options
+    def run_js(self,script,value):
+        assert '.ant-select-selection-item' in script and value==self.value
+        assert 'getAttribute("title")' in script and 'textContent.trim()' in script
+        self.events.append('verify')
+        return self.selected
+
+
+@pytest.mark.parametrize('degree', ['博士','硕士','本科','大专','中专/中技','高中','初中及以下'])
+def test_liepin_degree_native_visible_option(monkeypatch,degree):
+    events=[]
+    monkeypatch.setattr(adapters.time,'sleep',events.append)
+    adapter=adapters.PlatformAdapter('liepin',None,SimpleNamespace(degree=degree),'123')
+    adapter.check=lambda:('','')
+    options=[FilterElement(events,'hidden',False),FilterElement(events,'selected'),
+             FilterElement(events,'duplicate')]
+    adapter.search_tab=DegreeTab(events,degree,options)
+    adapter.apply_filters()
+    assert events==['open',1.5,'selected',3,'verify']
+
+
+@pytest.mark.parametrize('case', ['missing_control','no_options','hidden_options','bad_selection'])
+def test_liepin_degree_fails_closed(monkeypatch,case):
+    events=[]
+    monkeypatch.setattr(adapters.time,'sleep',events.append)
+    adapter=adapters.PlatformAdapter('liepin',None,SimpleNamespace(degree='本科'),'123')
+    adapter.check=lambda:('','')
+    options=[] if case=='no_options' else [FilterElement(events,'selected',case!='hidden_options')]
+    adapter.search_tab=DegreeTab(events,'本科',options,control=case!='missing_control',
+                                 selected=case!='bad_selection')
+    message='猎聘学历选中校验失败：本科' if case=='bad_selection' else '猎聘未找到学历选项：本科'
+    with pytest.raises(adapters.AdapterError,match=message): adapter.apply_filters()
+    assert ('selected' in events)==(case=='bad_selection')
+
+
+@pytest.mark.parametrize('degree', ['本科,硕士','本科，硕士','本科,本科'])
+def test_liepin_degree_multiple_rejected(degree):
+    adapter=adapters.PlatformAdapter('liepin',None,SimpleNamespace(degree=degree),'123')
+    adapter.check=lambda:pytest.fail('多值不得操作页面')
+    with pytest.raises(adapters.AdapterError,match='只支持一个'): adapter.apply_filters()
+
+
+@pytest.mark.parametrize('flag', ['--job-type','--experience','--degree',None])
+def test_yupao_filters_rejected_but_defaults_empty(flag):
+    flags=[] if flag is None else [flag,'本科' if flag=='--degree' else '实习']
+    parsed=runner.parse_args({'深圳':'123'},['--job','AI产品实习',*flags],platform='yupao')
+    adapter=adapters.PlatformAdapter('yupao',None,parsed,'123')
+    adapter.check=lambda:pytest.fail('鱼泡筛选不得操作页面')
+    if flag:
+        with pytest.raises(adapters.AdapterError,match='鱼泡无实习/学历/经验筛选.*AI产品实习.*Jev 硬条件'):
+            adapter.apply_filters()
+    else:
+        assert parsed.job_type==parsed.experience==parsed.degree==''
+        adapter.apply_filters()
+
+
+@pytest.mark.parametrize('experience,expected', [
+    ('在校生','在校生/应届生'),('应届生','在校生/应届生'),
+    ('在校生,应届生','在校生/应届生'),('在校生/应届生','在校生/应届生'),
+    ('1-3年','1-3年'),('应届生,在校生','应届生,在校生'),
+])
+def test_51job_experience_alias_native_selection(monkeypatch,experience,expected):
+    events=[]
+    monkeypatch.setattr(adapters.time,'sleep',lambda seconds:None)
+    adapter=adapters.PlatformAdapter('51job',None,SimpleNamespace(experience=experience),'123')
+    adapter.check=lambda:('','')
+    control=FilterElement(events,'open')
+    option=FilterElement(events,'selected')
+    def find_control(script,label):
+        assert label=='工作年限'
+        return control
+    def find_option(script,value):
+        assert value==expected
+        return option
+    control.run_js=find_option
+    adapter.search_tab=SimpleNamespace(run_js=find_control)
+    adapter.apply_filters()
+    assert events==['open','selected']
+
+
+@pytest.mark.parametrize('platform,default', [('51job',20),('liepin',60),('yupao',60)])
+def test_platform_max_views_default_and_override(platform,default):
+    parsed=runner.parse_args({'深圳':'123'},['--job','产品'],platform=platform)
+    assert parsed.max_views==default==rt.PLATFORM_PACING[platform]['max_views']
+    for explicit in (1,12,60):
+        parsed=runner.parse_args({'深圳':'123'},['--job','产品','--max-views',str(explicit)],platform=platform)
+        assert parsed.max_views==explicit
+
+
+@pytest.mark.parametrize('platform,limit', [('51job',20),('liepin',60),('yupao',60)])
+def test_main_passes_platform_to_parser(monkeypatch,platform,limit):
+    monkeypatch.setattr(runner,'load_config',lambda:{'default_count':2,'min_score':60})
+    def execute(p,a,cfg,adapter,root):
+        assert p==adapter.platform==platform and a.max_views==limit
+        assert adapter.browser is None
+        return {'views':0}
+    monkeypatch.setattr(runner,'execute',execute)
+    assert runner.main(platform,{'深圳':'123'},['--job','产品'])=={'views':0}
+
+
+@pytest.mark.parametrize('platform,interval,every,extra', [
+    ('51job',(15,30),5,(90,180)),('liepin',(6,15),10,(45,90)),
+    ('yupao',(6,15),10,(45,90)),
+])
+def test_runner_uses_platform_view_pacing(tmp_path,platform,interval,every,extra):
+    cards=[dict(job_id=str(i),title='产品实习',company=f'公司{i}',salary='',url='')
+           for i in range(1,2*every+1)]
+    parsed=runner.parse_args({'深圳':'123'},['--job','产品','--count',str(len(cards)),
+                                          '--dry-run','--matcher','keyword'],platform=platform)
+    rests=[]
+    def rest(value,check):
+        rests.append(value)
+        check()
+    stats=runner.execute(platform,parsed,config(tmp_path),FakeAdapter(cards),tmp_path,rest=rest)
+    assert stats['views']==len(cards)
+    assert rests==([interval]*every+[extra])*2
+
+
+@pytest.mark.parametrize('explicit,expected', [(None,20),(3,3),(25,25)])
+def test_51job_runner_respects_view_limit(tmp_path,explicit,expected):
+    cards=[dict(job_id=str(i),title='产品实习',company=f'公司{i}',salary='',url='') for i in range(1,31)]
+    flags=[] if explicit is None else ['--max-views',str(explicit)]
+    parsed=runner.parse_args({'深圳':'123'},['--job','产品','--count','30',
+                                          '--dry-run','--matcher','keyword',*flags],platform='51job')
+    adapter=FakeAdapter(cards)
+    stats=runner.execute('51job',parsed,config(tmp_path),adapter,tmp_path,rest=lambda *a:None)
+    assert stats['views']==len(adapter.opened)==expected
+    assert stats['stop_reason']=='已达 --max-views 上限'

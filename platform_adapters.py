@@ -11,6 +11,11 @@ class AdapterError(Exception):
 
 
 DOMAINS = {'liepin': 'liepin.com', '51job': '51job.com', 'yupao': 'yupao.com'}
+EVIDENCE_DOMAINS = {
+    'liepin': ('liepin.com',),
+    '51job': ('51job.com',),
+    'yupao': ('yupao.com', 'yupaowang.com'),
+}
 PATTERNS = {
     'liepin': r'^/(?:job|a)/(\d+)\.shtml$',
     '51job': r'^/[^/]+/(\d+)\.html$',
@@ -90,6 +95,7 @@ class PlatformAdapter:
     def __init__(self, platform, browser, args, city_code):
         self.platform, self.browser, self.args, self.city_code = platform, browser, args, city_code
         self.domain = DOMAINS[platform]
+        self.evidence_domains = EVIDENCE_DOMAINS[platform]
         self.verified_endpoints = VERIFIED_ENDPOINTS.get(platform, {})
         self.calibrated = platform in CALIBRATED
         self.search_tab = None
@@ -127,9 +133,16 @@ class PlatformAdapter:
         requested = [("工作类型", getattr(self.args, "job_type", "")),
                      ("工作年限", getattr(self.args, "experience", "")),
                      ("学历要求", getattr(self.args, "degree", ""))]
+        if self.platform == "yupao" and any(value for _, value in requested):
+            raise AdapterError("鱼泡无实习/学历/经验筛选，请用关键词（如 ‘AI产品实习’）并依赖 Jev 硬条件")
         for label, value in requested:
             if not value:
                 continue
+            if self.platform == "liepin" and label == "学历要求":
+                if "," in value or "，" in value:
+                    raise AdapterError("猎聘学历筛选只支持一个值")
+                if value not in ("博士", "硕士", "本科", "大专", "中专/中技", "高中", "初中及以下"):
+                    raise AdapterError("猎聘未找到学历选项：" + value)
             status, reason = self.check()
             if status:
                 return  # runner.check 负责冷却与落盘
@@ -141,7 +154,22 @@ class PlatformAdapter:
                 if not option:
                     raise AdapterError("猎聘未找到经验筛选选项：" + value)
                 option.click(by_js=False)
+            elif self.platform == "liepin" and label == "学历要求":
+                control = self.search_tab.ele(
+                    'xpath://span[contains(@class,"ant-select-selection-placeholder") and text()="学历"]'
+                    '/ancestor::div[contains(@class,"ant-select-selector")][1]', timeout=1)
+                if not control:
+                    raise AdapterError("猎聘未找到学历选项：" + value)
+                control.click(by_js=False)
+                time.sleep(1.5)
+                options = self.search_tab.eles(f'css:div.ant-select-item-option[title="{value}"]', timeout=1) or []
+                option = next((e for e in options if e.states.has_rect), None)
+                if option is None:
+                    raise AdapterError("猎聘未找到学历选项：" + value)
+                option.click(by_js=False)
             elif self.platform == "51job":
+                if label == "工作年限" and value in ("在校生", "应届生", "在校生,应届生"):
+                    value = "在校生/应届生"
                 container = self.search_tab.run_js('''
                     const t=Array.from(document.querySelectorAll(".fixed-text"))
                       .find(e=>e.textContent.trim().startsWith(arguments[0]));
@@ -160,6 +188,13 @@ class PlatformAdapter:
             else:
                 raise AdapterError(self.platform + " 的" + label + "尚未校准，不能静默忽略")
             time.sleep(3)
+            if self.platform == "liepin" and label == "学历要求":
+                selected = self.search_tab.run_js('''
+                    return Array.from(document.querySelectorAll(".ant-select-selection-item"))
+                      .some(e=>e.getAttribute("title")===arguments[0] || e.textContent.trim()===arguments[0]);
+                ''', value)
+                if not selected:
+                    raise AdapterError("猎聘学历选中校验失败：" + value)
 
     def check(self):
         for tab in (self.search_tab, self.detail_tab):

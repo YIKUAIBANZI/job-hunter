@@ -16,7 +16,7 @@ BOSS 保留现有已实测流程。猎聘、51job、鱼泡已接入共同运行�
 - 点击前原子写入 `pending`，监听 XHR/Fetch 后只原生点击一次。断连、超时、未知结果不重试，停止本轮。
 - 仅已校准端点且请求关联当前职位的响应可确认网络成功。未知接口 `code=0` 无效；当前岗位按钮在点击后变为明确成功状态也可确认。两路证据分别保存，不把其中一路伪称双证据。
 - 页面/接口出现风控立即停，写入该平台 2 小时冷却。登录或简历向导需要人工处理。
-- 详情间隔 6–15 秒，每 10 份额外休息 45–90 秒；投递后 30–90 秒，每 5 次成功额外休息 3–5 分钟。默认最多 60 份详情、5 页搜索，投满停止。节奏不保证免受风控。
+- 猎聘/鱼泡详情间隔 6–15 秒，每 10 份额外休息 45–90 秒，默认最多 60 份详情。51job 风控更敏感：详情间隔 15–30 秒，每 5 份额外休息 90–180 秒，默认最多 20 份详情；显式 `--max-views` 优先（1–60）。各平台投递后 30–90 秒，每 5 次成功额外休息 3–5 分钟，默认最多 5 页搜索，投满停止。节奏不保证免受风控。
 - 搜索标签复用；详情标签按 `openerId` 确认归属并清理。避免同时运行多个投递脚本或手动操作正在自动浏览的同一搜索页。
 
 ## 安装与启动
@@ -40,10 +40,13 @@ python3 -m pip install DrissionPage pytest
 
 ```bash
 # 不调用第三方模型：先核对真实 ID、标题、完整 JD
-python3 liepin_apply.py --job "AI产品经理" --city 深圳 --experience 实习生 \
+python3 liepin_apply.py --job "AI产品经理" --city 深圳 --experience 实习生 --degree 本科 \
   --count 2 --max-views 2 --max-pages 1 --dry-run --matcher keyword
 python3 51job_apply.py --job "AI产品经理" --city 深圳 --job-type 实习 \
   --experience 在校生/应届生 --degree 本科 --count 2 --max-views 2 --dry-run --matcher keyword
+# 27 届秋招校招岗位：工作类型用全职，工作年限用在校生/应届生
+python3 51job_apply.py --job "AI产品经理" --city 深圳 --job-type 全职 \
+  --experience 在校生/应届生 --degree 本科 --count 2 --dry-run --matcher keyword
 python3 yupao_apply.py --job "AI产品实习" --city 深圳 \
   --count 2 --max-views 2 --dry-run --matcher keyword
 
@@ -55,11 +58,13 @@ python3 yupao_apply.py --job "AI产品实习" --city 深圳 \
 | 筛选 | 猎聘 | 51job | 鱼泡 |
 |---|---|---|---|
 | 城市/关键词 | 支持 | 支持 | 支持 |
-| 经验 | 原生点击 `workYearCode` 控件，如 实习生/应届生 | 原生点击工作年限选项 | 待校准 |
-| 工作类型 | 待校准，可先用经验“实习生” | 原生点击，如 实习 | 待校准 |
-| 学历 | 待校准 | 原生点击，如 本科 | 待校准 |
+| 经验 | 原生点击 `workYearCode` 控件，如 实习生/应届生 | 原生点击工作年限选项；在校生、应届生、在校生,应届生均映射为 在校生/应届生 | 不支持 |
+| 工作类型 | 待校准，可先用经验“实习生” | 原生点击，全职/兼职/实习 | 不支持 |
+| 学历 | 原生点击，如 `--degree 本科`，只支持单个值 | 原生点击，如 本科 | 不支持 |
 
 不支持或页面已变化的筛选明确报错，不静默忽略，不臆造参数。岗位是否满足条件仍须按完整 JD 评估。
+
+猎聘学历可选：博士、硕士、本科、大专、中专/中技、高中、初中及以下；点击可见选项后校验选中结果。鱼泡无实习/学历/经验筛选（学历和经验下拉未触发列表重新请求，不能可靠筛选）；请用关键词（如“AI产品实习”）并依赖 Jev 硬条件，传入非空 `--job-type`、`--experience` 或 `--degree` 会明确报错。
 
 ## Jev 与隐私
 
@@ -92,7 +97,7 @@ python3 liepin_apply.py --job "AI产品经理" --city 深圳 --experience 实习
 - `<平台>-cooldown.json`：冷却截止时间。
 - `jev-<平台>-cache.json`：新平台缓存；BOSS 保留 `jev-cache.json`。
 
-网络证据只记录去查询参数的 URL、HTTP 状态、code、职位关联标志与风控分类，不写请求正文、密钥和原始响应消息。只 `applied` 计入成功；`pending` 需人工对照平台记录核验，不能直接删除后重跑。
+网络证据只记录去查询参数的 URL、HTTP 状态、code、职位关联标志与风控分类，不写请求正文、密钥和原始响应消息。鱼泡页面域名为 `yupao.com`，业务证据同时收取 `yupaowang.com` 及其子域名；同域埋点不会因收取而成为成功证据，非证据域名仅记录 host/path。只 `applied` 计入成功；`pending` 需人工对照平台记录核验，不能直接删除后重跑。
 
 ## BOSS 现有入口
 
