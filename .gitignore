@@ -25,3 +25,11 @@ chrome-debug/
 boss-cooldown.json
 official-cache.json
 官网投递.md
+
+*-cooldown.json
+jev-*-cache.json*
+*-log.json.tmp
+boss-greet.json
+# 校准证据含投递公司/职位，仅本地保留
+evidence/*.json
+evidence/platform-validation-*.md

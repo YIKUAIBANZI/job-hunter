@@ -1,177 +1,128 @@
-# Job Hunter — AI 辅助的求职自动投递
+# Job Hunter — AI 辅助求职
 
-> 与其广撒网，不如精准慢投。让 AI 读你的简历，只投匹配的岗位。
+用本地 Chrome 读取招聘岗位，按简历和偏好筛选，再通过浏览器点击提交并核验。支持 BOSS、猎聘、51job、鱼泡；不会重放平台内部接口，不处理或绕过验证码。
 
-这是一个 [Claude Code](https://claude.com/claude-code) 的 **skill**，把你的简历读一遍、记住你的方向和底线，然后在招聘平台上按岗位匹配度自动点击投递按钮。
+## 当前能力与边界
 
-## 它能做什么
+BOSS 保留现有已实测流程。猎聘、51job、鱼泡已接入共同运行器，**仍处于上线校准阶段，不能把离线测试或只读浏览当成投递成功**。逐平台证据见 [验证记录](evidence/platform-validation-2026-10-14.md)。
 
-- 📄 **读你的简历**，提取技能关键词（8-15 个），存到本地配置
-- 🎯 **按 JD 匹配度投递**：Boss 默认用 Jev 匹配 JD × 脱敏简历，分为推荐 / 复核 / 跳过；其他平台继续关键词评分
-- 🌐 **多平台**：Boss 直聘、鱼泡直聘、前程无忧 51job
-- 🗂️ **完整日志**：每次投递记录岗位、评分、动作，避免重复投
+三个新平台默认 `--matcher jev`，也支持完全本地的 `--matcher keyword`。`--dry-run` 实际阻止所有投递和聊天动作。关键词模式只是回退/对照，可能把销售、研发岗位判高分，也可能因正文出现“资深”误杀实习岗位。
 
-## 它不做什么
+共同流程包含：
 
-- ❌ **不伪造简历**、不代写求职信
-- ❌ **不绕过平台反爬** — 用本地 Chrome 真实浏览器跑，会被 IP 风控/频率限制
-- ❌ **不帮你面试** — 投递是第一步，HR 还是得自己聊
+- 平台职位 ID 定位、卡片与详情 ID/标题核对；未知身份进入复核。
+- Jev 标题粗筛、完整 JD 匹配、7 天结论缓存、复核队列。
+- `<平台>:<id>` 与公司+标题双去重，`pending` 也阻止重复提交。公司未知时只按 ID 去重，正式提交前必须取得公司信息。
+- 点击前原子写入 `pending`，监听 XHR/Fetch 后只原生点击一次。断连、超时、未知结果不重试，停止本轮。
+- 仅已校准端点且请求关联当前职位的响应可确认网络成功。未知接口 `code=0` 无效；当前岗位按钮在点击后变为明确成功状态也可确认。两路证据分别保存，不把其中一路伪称双证据。
+- 页面/接口出现风控立即停，写入该平台 2 小时冷却。登录或简历向导需要人工处理。
+- 详情间隔 6–15 秒，每 10 份额外休息 45–90 秒；投递后 30–90 秒，每 5 次成功额外休息 3–5 分钟。默认最多 60 份详情、5 页搜索，投满停止。节奏不保证免受风控。
+- 搜索标签复用；详情标签按 `openerId` 确认归属并清理。避免同时运行多个投递脚本或手动操作正在自动浏览的同一搜索页。
 
-## 安装
+## 安装与启动
 
-### 1. 放到 Claude Code skills 目录
-
-```bash
-git clone https://github.com/<your>/job-hunter.git ~/.claude/skills/job-hunter
-```
-
-### 2. 安装依赖
+需要 Python 3.10+、DrissionPage 4.x，以及 Chrome：
 
 ```bash
-pip install DrissionPage
-```
+python3 -m pip install DrissionPage pytest
 
-### 3. 启动远程调试的 Chrome
-
-```bash
-# macOS
+# macOS；此目录保留平台登录状态，不要上传
 /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
   --remote-debugging-port=9222 \
-  --user-data-dir=/tmp/chrome-debug
-
-# Windows
-"C:\Program Files\Google\Chrome\Application\chrome.exe" ^
-  --remote-debugging-port=9222 ^
-  --user-data-dir=C:\temp\chrome-debug
-
-# Linux
-google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug
+  --user-data-dir="$PWD/chrome-debug"
 ```
 
-在这个 Chrome 里登录 Boss / 鱼泡。
+在该 Chrome 中手动登录目标平台。51job 还需填写在线简历。
 
-### 4. 准备简历
+复制 `config.example.json` 为 `config.json`，配置 UTF-8 文本简历路径、`job_profile`、`resume_redact`、公司黑名单等。不要将个人配置、简历、日志、浏览器目录或密钥提交到 Git。
 
-把你的简历丢到任意位置（支持 `.md` / `.txt`；PDF 请先转文本）：
+## 先只读验证
 
 ```bash
-cp ~/Documents/my-resume.md ~/.claude/skills/job-hunter/resume.md
+# 不调用第三方模型：先核对真实 ID、标题、完整 JD
+python3 liepin_apply.py --job "AI产品经理" --city 深圳 --experience 实习生 \
+  --count 2 --max-views 2 --max-pages 1 --dry-run --matcher keyword
+python3 51job_apply.py --job "AI产品经理" --city 深圳 --job-type 实习 \
+  --experience 在校生/应届生 --degree 本科 --count 2 --max-views 2 --dry-run --matcher keyword
+python3 yupao_apply.py --job "AI产品实习" --city 深圳 \
+  --count 2 --max-views 2 --dry-run --matcher keyword
+
+# 已授权 Jev 数据外发并配置 key 后，将 --matcher keyword 改为 --matcher jev
 ```
 
-## 使用
+`--count` 在 dry-run 中限制本轮评估岗位数（包含标题粗筛结论）。历史去重、缺 ID 和黑名单不计评估数量；详情另受 `--max-views` 限制。
 
-在 Claude Code 里说一句触发词就行：
+| 筛选 | 猎聘 | 51job | 鱼泡 |
+|---|---|---|---|
+| 城市/关键词 | 支持 | 支持 | 支持 |
+| 经验 | 原生点击 `workYearCode` 控件，如 实习生/应届生 | 原生点击工作年限选项 | 待校准 |
+| 工作类型 | 待校准，可先用经验“实习生” | 原生点击，如 实习 | 待校准 |
+| 学历 | 待校准 | 原生点击，如 本科 | 待校准 |
 
-```
-帮我投简历
-自动投递
-job-hunter
-```
+不支持或页面已变化的筛选明确报错，不静默忽略，不臆造参数。岗位是否满足条件仍须按完整 JD 评估。
 
-**首次运行**，Claude 会：
-1. 问你简历路径、期望岗位方向、要排除的岗位词
-2. 读简历、抽技能、生成打招呼话术
-3. 写入 `config.json`，展示给你确认
+## Jev 与隐私
 
-**后续运行**，直接问 "岗位 / 城市 / 数量 / 平台"，然后开始投。
+Jev 将**脱敏简历、求职偏好、职位标题/公司和完整 JD**发送到 `https://api.typesafe.ai/v1/systemone`。姓名等 `resume_redact` 指定字符串、手机号、邮箱会被替换；学校和项目等仍可能识别个人。使用前确认授权及脱敏边界。dry-run 在 Jev 模式下也会真实请求和计费；keyword 不外发简历。
 
-## 手动运行（不走 Claude）
+密钥只读环境变量 `JEV_API_KEY`，或仓库外 `~/.config/jobhunter/jev.env` 中的 `JEV_API_KEY=...`。缺 key 或不可读简历时停止，不静默降级。
+
+底层复用 `jev_match.decide`：学历、在校/应届、到岗/时长/城市三问取最小 `hard`，方向匹配用四档概率期望 `fit`。交接方案 B：hard < 0.2、明确建议跳过（概率 ≥ 0.6）或 fit < 1.5 时跳过；hard ≥ 0.6、fit ≥ 2.3 且未建议跳过时推荐，其余复核。
+
+**新平台默认额外采用 `--match-policy review-gate`：Jev 建议复核时不自动投递。** 原始 Jev 结果与最终处理结论分开保存。`--match-policy boss-b` 可用于与交接方案 B 对照；BOSS 的阈值本次未改。
+
+新平台缓存按平台、简历/偏好/问题/阈值版本摘要隔离，更新材料自动失效；`--refresh` 强制重评。命中 7 天缓存的复核/跳过不再打开详情；真实提交前仍需读取当前详情、核对身份并重新检查 JD。缓存不写简历和 JD 原文。
+
+## 首单校准与结果
+
+已校准平台见 `platform_adapters.CALIBRATED`：猎聘已完成两次首单（`open-chat` 返回 `flag=1` + 按钮变“继续聊”）；51job、鱼泡尚未校准（鱼泡 1 次仅页面证据），普通真实批量运行会在连接浏览器前停止。**真实投递须先征得用户对该平台和岗位的明确授权**，随后仅运行一份：
 
 ```bash
-cd ~/.claude/skills/job-hunter
-
-# 鱼泡（支持 50+ 城市）
-python3 yupao_apply.py --job "产品经理实习" --city 深圳 --count 20
-
-# Boss 直聘（默认 Jev，先配置 key、文本简历和 job_profile）
-python3 boss_apply.py --job "产品经理" --city 深圳 --count 20
-
-# Boss 只浏览 JD、打印职位 ID 和评分，不点“立即沟通”（count 为评分上限）
-python3 boss_apply.py --job "产品经理" --city 深圳 --count 20 --dry-run
-
-# Boss 使用原关键词评分（不调用 Jev，仍按 min_score 过滤）
-python3 boss_apply.py --job "产品经理" --city 深圳 --matcher keyword --min-score 60
-
-# 关掉评分过滤，全投
-python3 yupao_apply.py --job "Java实习" --city 北京 --count 20 --min-score 0
+# 仅在只读验证、登录、匹配结论及用户授权均完成后运行
+python3 liepin_apply.py --job "AI产品经理" --city 深圳 --experience 实习生 \
+  --count 1 --max-views 5 --job-id 已确认的数字职位ID --calibrate
 ```
 
-**Boss 核验与节奏**：卡片按职位 ID 定位；缺 ID 记 `skipped`（无职位ID）。仅接口 HTTP 200 且 `code=0` 记 `applied`（`status=chat_started`）并计入成功；未捕获响应记 `pending`，不计数、不重试，并加入去重。明确错误记 `failed`；接口风控或页面验证记 `failed`（`status=blocked`），汇总后立即退出。
+`--calibrate` 最多尝试一次，不自动确认额外弹窗，不自动发送自定义招呼语、不自动切换另一种投递动作。需要额外确认、返回未知结果或页面断连时保留 `pending`。若按钮成功但接口尚未识别，只记录页面证据；维护者应人工核对本次请求的端点、职位字段与成功码后添加精确协议并补测试，不能仅因一次点击自动解锁批量。
 
-Boss 日志的 `evidence.packets` 保存本次点击后 8 秒核验窗口内捕获的全部 `friend/add` 命中包：`url`、`http_status`、原始 `code` 和 `message`（最多 200 字）。监听路径和验证弹层选择器仍需实测校准；多包时风控优先终止，其余以捕获到接口确认为成功。去重先查 `boss:{job_id}`，再查公司+岗位旧键，兼容旧日志及跨平台去重。
+结果文件：
 
-默认每次沟通点击后随机等待 30–90 秒，每确认成功 5 份额外休息 3–5 分钟，浏览等待有 ±25% 抖动。`--fast` **仅供调试**，将沟通间隔及额外休息降为 3–6 秒，核验窗口仍为 8 秒。`--dry-run` 不沟通、不写 `applied/pending`；Jev 模式仍请求或读取缓存，写 `review/skipped` 和队列，keyword 模式保留只打印评分、不写评分 `skipped` 的旧行为。缺 ID、黑名单、历史去重仍可记录跳过。两个开关目前只有 Boss 实际使用。
+- `<平台>-<城市>-log.json`：applied/pending/review/skipped/failed；风控为 `failed` 下 `status=blocked`。点击后风控仍保留 pending 防重。
+- `<平台>-<城市>-队列.md`：本轮推荐、复核、跳过、数量和停止原因。推荐不等于投递成功。
+- `<平台>-cooldown.json`：冷却截止时间。
+- `jev-<平台>-cache.json`：新平台缓存；BOSS 保留 `jev-cache.json`。
 
-## Boss 的 Jev 匹配
+网络证据只记录去查询参数的 URL、HTTP 状态、code、职位关联标志与风控分类，不写请求正文、密钥和原始响应消息。只 `applied` 计入成功；`pending` 需人工对照平台记录核验，不能直接删除后重跑。
 
-设置环境变量 `JEV_API_KEY`，或在仓库外的 `~/.config/jobhunter/jev.env` 保存一行 `JEV_API_KEY=<你的 key>`（建议文件权限 `600`）。环境变量优先；默认 `--matcher jev` 缺 key 会醒目报错并退出，不静默降级。不要把真实 key 写进配置、命令示例、日志或仓库。
+## BOSS 现有入口
 
-`config.json` 设置 UTF-8 `.md/.txt` 的 `resume_path`、`job_profile` 和 `resume_redact`；相对简历路径按脚本目录解析，PDF 请先转文本。每次将标题、公司、完整 JD、脱敏简历及求职偏好合成 state，一次请求三个问题：硬条件 `hard_ok`、核心职责匹配 `fit`、处理建议 `action`。接口结构见 [TypeSafe API](https://docs.typesafe.ai/api) 与 [问题类型](https://docs.typesafe.ai/primitives)。
+```bash
+python3 boss_apply.py --job "AI产品经理" --city 深圳 --count 2 --dry-run
+```
 
-硬条件拆成三问（学历 / 在校·应届 / 到岗·时长·城市），`hard_ok` 取最小值，原因会写明卡在哪一项。规则依次执行：`hard_ok < 0.2` 跳过；Jev 建议跳过且该选项概率 ≥ 0.6 时跳过；`fit_ev < 1.5` 跳过；`hard_ok ≥ 0.6`、`fit_ev ≥ 2.3` 且 Jev 未建议跳过即推荐投递；其余人工复核。JD 送 Jev 前会去掉 Boss 反爬水印字与页脚。`fit_ev` 用四档概率的期望值计算，范围 0–3。noul 用于挡明确冲突，较高数值也不是“满足硬条件”的事实证明；这些阈值仍需用真实岗位人工校准。
+BOSS 默认 `--match-policy review-gate`：Jev 建议复核的岗位一律进队列，不自动沟通；`--match-policy boss-b` 恢复旧方案 B。
 
-Jev 模式的 `exclude_keywords` **只匹配标题**，黑名单和历史去重在请求前拦截。`review` 不沟通、不计成功，也不进入去重索引；调用或响应解析失败进入复核，连续失败 3 次停止。只有 `apply` 进入原沟通核验流程。`--min-score` 仅影响 keyword 模式，鱼泡 / 51job / 猎聘仍使用 `score_jd`。
+可选：投完后给 HR 未回复的会话补发带岗位名的招呼语（默认只预览，`--send` 才发送；公司+岗位核对一致才发，HR 已回复跳过，发过的记在 `boss-greet.json` 不重发）：
 
-缓存 `jev-cache.json` 与日志同目录，键为 `boss:{job_id}:{JD 的 SHA1 前12位}`，保存原始 answers、决策和时间，不保存简历/JD/key。相同职位与 JD 命中后不再请求；修改简历、求职偏好或问题文本后，应删除缓存再评。阈值修改会用缓存 answers 重新决策。
+```bash
+python3 boss_greet.py --city 深圳            # 预览
+python3 boss_greet.py --city 深圳 --send --count 10
+```
 
-每次结束（包括 dry-run、风控或连续调用失败退出）覆盖 `boss-{城市}-队列.md`：推荐 / 复核 / 跳过 / 已沟通 / 待核验统计，人工复核表、推荐但未投表、最多 50 行跳过表；dry-run 额外列出旧 `score_jd` 分数对照。读取 JD 前拦截的岗位显示 `—`，避免把未读取的 JD 当成完整评分。队列仅包含本次已处理岗位。
+模板可在 `config.json` 用 `greeting_template` 配置，占位符 `{job}` `{company}` `{greeting}`。
 
-正式 Jev 模式达到 `--count` 后评完当前已加载批次，余下推荐留在队列，不再沟通或加载新批次；dry-run 的 `--count` 仍是评估数量上限。keyword 保持达到数量后立即停止的旧行为。
+BOSS 与新平台共用节奏常量、日志原子写入、平台 ID 索引和队列标题。`--fast` 等旧调试参数仅属于 BOSS，新平台不开放加速/跳过冷却。
 
-## 配置说明
+## 代码与验证
 
-首次引导后会生成 `config.json`，字段含义：
+- `platform_runner.py`：匹配、缓存、去重、队列、运行上限、提交状态。
+- `platform_adapters.py`：搜索筛选、DOM 卡片、详情、按钮与标签生命周期。
+- `apply_runtime.py`：节奏、风控、提交预记、监听和证据核验。
+- 三个平台的 `*_apply.py`：保留城市表及 CLI 入口。
+- `official_apply.py`：原有官网入口补全工具，本次未改。
 
-| 字段 | 作用 |
-|------|------|
-| `resume_path` | 简历文件路径 |
-| `job_profile` | Jev 求职偏好：学历/届别/方向/城市/到岗与实习时长等，默认空字符串 |
-| `resume_redact` | 发送前替换为 `[已隐去]` 的字符串列表，如姓名；默认 `[]`，手机号与邮箱自动脱敏 |
-| `greeting` | 打招呼话术（目前仅存储，脚本默认走平台沟通流程） |
-| `skills` | 你的技能词 → JD 每命中一个 +5 分，封顶 +30 |
-| `target_roles` | 期望岗位 → 标题命中 +30 分 |
-| `exclude_keywords` | Boss Jev 只匹配标题；keyword 及其他平台匹配标题 + JD，命中归零 |
-| `boost_keywords` | 加权词 → JD 命中 +10 分（AI/LLM 等） |
-| `min_score` | keyword 最低投递分，默认 60；Boss Jev 不使用 |
-| `default_count` | 默认投递数量 |
+```bash
+python3 -m pytest -q
+```
 
-随时手改 `config.json` 即可调整权重。
-
-## Token 消耗预估
-
-| 阶段 | Tokens |
-|------|--------|
-| 首次引导（读简历 + 抽技能 + 生成话术） | ~6K |
-| 每次启动投递（读 config + 运行脚本 + 汇报结果） | ~3K |
-| keyword 本地评分匹配 | **0**（纯 Python 规则，不走 LLM） |
-| Boss Jev 匹配 | 每个未命中缓存的岗位一次 API 请求，按 Jev 实际用量计费 |
-
-上面的启动 Token 数是粗略估计；Jev 模式还会发送脱敏简历和 JD，API 用量随未缓存岗位数量及材料长度增加，dry-run 也会产生请求用量。
-
-## 平台支持
-
-| 平台 | 投递方式 | 城市 | 前置要求 |
-|------|---------|------|---------|
-| Boss 直聘 | "立即沟通" | 9 大城市 + 全国 | 登录 |
-| 鱼泡直聘 | "发送简历"优先，降级"聊一聊" | 50+ 城市 | 登录 |
-| 前程无忧 51job | 搜索页内联"投递"按钮 | 北京/上海/广州/深圳/杭州 | **登录 + 完善 51job 在线简历**（必须有在线简历，否则投递会被踢回简历向导页） |
-
-**51job 特别说明**：
-- 跳转到 `yingjiesheng.com`（应届生求职网）的校招岗位会被**自动跳过**
-- 首屏卡片因 Vue 懒加载有时首次点击失败，已加重试，但仍可能需要多遍历几张卡片
-
-## 安全与伦理
-
-- 浏览器控制在本地运行；**启用 Jev 后，脱敏简历 + JD + 岗位/公司 + 求职偏好会发送到 `api.typesafe.ai`**，并非全程不上传第三方
-- 手机号（大陆 11 位）、邮箱及 `resume_redact` 指定项会替换为 `[已隐去]`；其他学校/项目等内容仍可能识别个人，发送前检查材料及自定义隐去项。keyword 模式不调用 Jev
-- 投递动作是**真实点击**，和你手工操作等价 —— 平台接受即接受
-- 遵守平台的日沟通上限，不会主动绕过
-- 日志、`jev-cache.json` 和 `*-队列.md` 均保存在本地并加入 `.gitignore`；不在其中保存 Jev key 或发送的简历原文
-
-## 开源许可
-
-MIT
-
-## 致谢
-
-用 [DrissionPage](https://github.com/g1879/DrissionPage) 做浏览器控制，比 Selenium 轻很多。
+测试使用离线替身，不能替代真实页面、真实模型和首单验收。[DrissionPage 监听文档](https://www.drissionpage.cn/browser_control/listener/)说明正常浏览器请求的监听方式。

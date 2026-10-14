@@ -309,3 +309,17 @@ def test_boss_browse_args_defaults_and_overrides():
     ])
     assert args.max_views == 12
     assert args.refresh is args.fill_queue is args.ignore_cooldown is True
+
+
+def test_boss_match_policy_defaults_to_review_gate():
+    args = parse_common_args(CITY_CODES, include_matcher=True, argv=["--job", "产品"])
+    assert args.match_policy == "review-gate"
+    args = parse_common_args(CITY_CODES, include_matcher=True, argv=["--job", "产品", "--match-policy", "boss-b"])
+    assert args.match_policy == "boss-b"
+
+
+def test_boss_apply_uses_effective_decision():
+    # Boss 详情评分后必须经过 review-gate，不能直接用方案 B 结果
+    from pathlib import Path
+    src = (Path(__file__).parent / "boss_apply.py").read_text()
+    assert 'decision = effective_decision(result, args.match_policy)' in src

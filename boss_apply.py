@@ -8,6 +8,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
+from apply_runtime import (CHAT_INTERVAL, SUCCESS_REST_EVERY, SUCCESS_REST,
+                           VIEW_INTERVAL, VIEW_REST_EVERY, VIEW_REST)
+
+from platform_runner import effective_decision
 from jev_match import (
     MAX_CONSECUTIVE_FAILURES,
     JevError,
@@ -81,13 +85,7 @@ def build_search_url(job, city_code, job_type="实习", experience="", degree=""
 # 调试快模式不改变接口核验窗口；默认保留慢节奏。
 CHAT_TARGET = "friend/add"
 CHAT_RESPONSE_TIMEOUT = 8
-CHAT_INTERVAL = (30, 90)
 FAST_INTERVAL = (3, 6)
-SUCCESS_REST_EVERY = 5
-SUCCESS_REST = (180, 300)
-VIEW_INTERVAL = (6, 15)
-VIEW_REST_EVERY = 10
-VIEW_REST = (45, 90)
 FAST_VIEW_INTERVAL = (1, 3)
 FAST_VIEW_REST = (3, 6)
 BROWSE_JITTER = 0.25
@@ -532,7 +530,7 @@ def main():
                                 raise SystemExit(1)
                             continue
                         consecutive_jev_failures = 0
-                        decision = result["decision"]
+                        decision = effective_decision(result, args.match_policy)
                         entry.update(jev=result, decision=decision["decision"], reason=decision["reason"])
                         metrics = format_result(decision)
                         print(f"[{decision['decision']}] {metrics} | {company} | {title} → {decision['reason']}")

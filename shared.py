@@ -44,7 +44,9 @@ def load_log(log_file: Path) -> dict:
 
 
 def save_log(log: dict, log_file: Path):
-    log_file.write_text(json.dumps(log, ensure_ascii=False, indent=2))
+    temp = log_file.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(log_file)
 
 
 def cooldown_remaining(path: Path, now: datetime) -> timedelta | None:
@@ -178,6 +180,8 @@ def parse_common_args(
         p.add_argument("--ignore-cooldown", action="store_true", help="Boss 跳过启动时的风控冷却检查")
         p.add_argument("--matcher", choices=("jev", "keyword"), default="jev",
                        help="Boss 匹配器：jev（默认）或 keyword（使用 --min-score）")
+        p.add_argument("--match-policy", choices=("review-gate", "boss-b"), default="review-gate",
+                       help="Boss Jev 放行策略：review-gate（默认，Jev 建议复核的一律进队列）或 boss-b（旧方案 B）")
         p.add_argument("--job-type", default="实习", help="Boss 求职类型：不限/全职/实习/兼职（默认 实习）")
         p.add_argument("--experience", default="在校生,应届生,经验不限",
                        help="Boss 工作经验，逗号分隔，如 在校生,应届生（空=不限）")
@@ -229,7 +233,7 @@ def dedup_key(company, title) -> str:
 
 
 def load_applied_index(skill_dir: Path | None = None) -> set[str]:
-    """聚合 *-log.json 的 applied/pending；保留公司+标题键，职位 ID 另加 boss: 键。
+    """聚合 *-log.json 的 applied/pending；保留公司+标题键，职位 ID 另加 <平台>: 键。
 
     跨搜索、跨平台生效；删除某个 log 文件即自动"遗忘"对应记录。
     坏文件/缺字段一律跳过，不抛异常。
@@ -253,8 +257,10 @@ def load_applied_index(skill_dir: Path | None = None) -> set[str]:
                 key = dedup_key(entry.get("company", ""), entry.get("job", ""))
                 if key:
                     index.add(key)
-                if entry.get("job_id"):
-                    index.add(f"boss:{entry['job_id']}")
+                platform = entry.get("platform") or log_file.name.split("-", 1)[0]
+                job_id = entry.get("job_id") or entry.get("jobId")
+                if job_id and platform in ("boss", "liepin", "51job", "yupao"):
+                    index.add(f"{platform}:{job_id}")
     return index
 
 
