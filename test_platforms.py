@@ -388,7 +388,7 @@ def test_calibrated_platforms_and_alias_scoped():
     a=adapters.PlatformAdapter.__new__(adapters.PlatformAdapter)
     a.platform='yupao'
     assert a.request_id_aliases('1975191697')==set()
-    assert adapters.CALIBRATED=={'liepin','yingjiesheng'}
+    assert adapters.CALIBRATED=={'liepin','yingjiesheng','51job'}
 
 
 @pytest.mark.parametrize('url,expected', [
@@ -1317,3 +1317,11 @@ def test_approved_adapter_direct_navigation_identity_and_cleanup(monkeypatch, pl
     assert adapter.verified_button(card) is None
     adapter.close()
     assert events == [url, 'closed'] and not adapter.owned_details
+
+
+@pytest.mark.parametrize('outer,msg,expected', [('1','成功','applied'),('1','失败','failed'),('0','成功','failed')])
+def test_51job_light_apply_endpoint_classification(outer,msg,expected):
+    url='https://cupid.51job.com/open/user-apply/open/user-apply/light-apply-job'
+    info={'url':url,'http_status':200,'correlated':True,'outer_status':outer,
+          'success_message':msg=='成功','blocked':False}
+    assert rt.classify_response(info,adapters.VERIFIED_ENDPOINTS['51job'])==expected

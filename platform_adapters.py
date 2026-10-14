@@ -134,11 +134,14 @@ return Array.from(document.querySelectorAll('main [data-index]')).map(c=>{
 # 猎聘：2026-10-14 两次校准（1985442155、1975191697），open-chat 返回 flag=1 且按钮变“继续聊”。
 VERIFIED_ENDPOINTS = {
     'liepin': {'https://api-c.liepin.com/api/com.liepin.im.c.chat.open-chat': ('flag', 1)},
+    # 51job：2026-10-14 首单校准（173558282），列表“投递”调用 light-apply-job，外层 status "1" 且消息成功，按钮变“已申请”。
+    '51job': {'https://cupid.51job.com/open/user-apply/open/user-apply/light-apply-job':
+              lambda info: info.get('outer_status') == '1' and info.get('success_message') is True},
     # 应届生：2026-10-14 首单校准（167341639），外层 status "1" 且 items[0].status "1"，按钮变“已申请”。
     'yingjiesheng': {'https://youngapi.yingjiesheng.com/open/yjs/apply':
                     lambda info: info.get('outer_status') == '1' and info.get('nested_status') == '1'},
 }
-CALIBRATED = {'liepin', 'yingjiesheng'}
+CALIBRATED = {'liepin', 'yingjiesheng', '51job'}
 
 
 class PlatformAdapter:
