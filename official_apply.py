@@ -15,6 +15,7 @@ from urllib import error, request
 from urllib.parse import unquote, urlsplit
 
 from jev_match import JEV_MODEL, JEV_URL, JevError, load_jev_key
+from shared import cache_path, report_path
 
 TAVILY_URL = "https://api.tavily.com/search"
 AGGREGATORS = [
@@ -48,7 +49,7 @@ def normalize_company(company: str) -> str:
 def collect_companies(directory: Path) -> list[dict]:
     """合并所有 Boss 日志；review 本身入选，skipped 不因 apply 再入选。"""
     companies = {}
-    for path in sorted(Path(directory).glob("boss-*-log.json")):
+    for path in sorted((Path(directory) / "data" / "logs").glob("boss-*-log.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -367,6 +368,7 @@ def get_cached(cache: dict, company: dict, now: datetime) -> dict | None:
 
 
 def save_cache(path: Path, cache: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -455,8 +457,8 @@ def main(argv=None) -> int:
     companies = ([{"company": args.company.strip(), "jobs": [args.job.strip()] if args.job and args.job.strip() else [],
                    "boss_urls": []}] if args.company is not None else collect_companies(directory))
     now = datetime.now().astimezone()
-    cache_path = directory / "official-cache.json"
-    cache = load_cache(cache_path)
+    cache_file = cache_path(directory, "official-cache.json")
+    cache = load_cache(cache_file)
     results, searched, skipped = [], 0, 0
     for company in companies:
         result = None if args.refresh else get_cached(cache, company, now)
@@ -473,8 +475,10 @@ def main(argv=None) -> int:
         # 即使上游意外回显 key，也不能落盘；URL 含 key 的候选已在搜索层丢弃。
         secrets = (tavily_key, jev_key)
         safe_cache = json.loads(_redact(json.dumps(cache, ensure_ascii=False), secrets))
-        save_cache(cache_path, safe_cache)
-        (directory / "官网投递.md").write_text(_redact(render_official_md(results, now), secrets), encoding="utf-8")
+        save_cache(cache_file, safe_cache)
+        path = report_path(directory, "官网投递.md")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_redact(render_official_md(results, now), secrets), encoding="utf-8")
     except (OSError, ValueError):
         print("无法写入官网报告或缓存，请检查目录权限和文件状态。", file=sys.stderr)
         return 1

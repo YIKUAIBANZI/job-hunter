@@ -249,10 +249,10 @@ def main(argv=None):
     # 延迟导入，让纯函数及 --help 不依赖浏览器连接，也不读取个人配置。
     from apply_runtime import write_cooldown
     from boss_apply import page_block_reason
-    from shared import connect_chrome, cooldown_remaining, load_log
+    from shared import connect_chrome, cooldown_remaining, load_log, log_path, cooldown_path, report_path
 
     root = Path(__file__).parent
-    cooldown_file = root / 'boss-cooldown.json'
+    cooldown_file = cooldown_path(root, 'boss')
     left = cooldown_remaining(cooldown_file, datetime.now().astimezone())
     if left:
         print(f'风控冷却中，剩余 {left}；未连接浏览器，日报未更新')
@@ -269,7 +269,7 @@ def main(argv=None):
 
     tabs = []
     try:
-        log = load_log(root / f'boss-{args.city}-log.json')
+        log = load_log(log_path(root, 'boss', args.city))
         browser = connect_chrome()
 
         def open_tab(url):
@@ -285,7 +285,7 @@ def main(argv=None):
         boss_items = match_applied(read_boss_items(boss_tab, check_block), log)
         liepin_items = None if args.no_liepin else match_applied(
             read_liepin_items(open_tab(LIEPIN_URL), check_block),
-            load_log(root / f'liepin-{args.city}-log.json'))
+            load_log(log_path(root, 'liepin', args.city)))
         # 猎聘读取期间 Boss 也可能出现风控，写报告前再次检查所有自建标签。
         for tab in tabs:
             check_block(tab)
@@ -304,7 +304,9 @@ def main(argv=None):
                 print(f'自建标签关闭失败：{exc}')
 
     try:
-        (root / REPORT_FILE).write_text(report, encoding='utf-8')
+        path = report_path(root, REPORT_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(report, encoding='utf-8')
     except OSError as exc:
         print(f'日报写入失败：{exc}')
         return 1

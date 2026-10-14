@@ -33,6 +33,7 @@ from jev_match import (
 )
 from shared import (
     BOSS_JOB_ID_PATTERN,
+    log_path, cooldown_path, cache_path, queue_path,
     classify_boss_chat_response,
     connect_chrome,
     cooldown_remaining,
@@ -315,8 +316,8 @@ def start_chat(page, job_id, *, detail_title=None, before_click=None):
 
 def run_approved(args, cfg, root, *, rest=paced_rest):
     """只打开日志中的批准详情，提交核验仍由 start_chat 完成。"""
-    log_file = root / f'boss-{args.city}-log.json'
-    cooldown_file = root / 'boss-cooldown.json'
+    log_file = log_path(root, 'boss', args.city)
+    cooldown_file = cooldown_path(root, 'boss')
     log, index = load_log(log_file), load_applied_index(root)
     counts = dict(applied=0, pending=0, skipped=0, views=0)
     page = None
@@ -438,10 +439,11 @@ def main():
     )
     configure_jev({**cfg, "matcher": args.matcher})
     city_code = CITY_CODES.get(args.city, "100010000")
-    log_file = Path(__file__).parent / f"boss-{args.city}-log.json"
-    queue_file = log_file.with_name(f"boss-{args.city}-队列.md")
-    cache_file = log_file.with_name("llm-cache.json" if args.matcher == "llm" else "jev-cache.json")
-    cooldown_file = log_file.with_name("boss-cooldown.json")
+    root = Path(__file__).parent
+    log_file = log_path(root, "boss", args.city)
+    queue_file = queue_path(root, "boss", args.city)
+    cache_file = cache_path(root, "llm-cache.json" if args.matcher == "llm" else "jev-cache.json")
+    cooldown_file = cooldown_path(root, "boss")
     if not args.ignore_cooldown:
         remaining = cooldown_remaining(cooldown_file, datetime.now().astimezone())
         if remaining is not None:
@@ -476,6 +478,7 @@ def main():
                  "skip": sum(r.get("decision") == "skip" or r.get("status") == "already_contacted"
                              for r in rows), "applied": applied_count,
                  "pending": pending_count, "stop_reason": stop_reason}
+        queue_file.parent.mkdir(parents=True, exist_ok=True)
         queue_file.write_text(render_queue_md(rows, stats), encoding="utf-8")
         print_summary("Boss直聘", applied_count, skipped_count, log_file, pending=pending_count)
         print(f"📋 推荐: {stats['apply']} 份  复核: {stats['review']} 份 | 队列: {queue_file}")
@@ -491,6 +494,7 @@ def main():
         entry.update(status="blocked", reason=reason)
         now = datetime.now().astimezone()
         try:
+            cooldown_file.parent.mkdir(parents=True, exist_ok=True)
             cooldown_file.write_text(json.dumps({
                 "until": (now + timedelta(hours=2)).isoformat(), "reason": reason,
                 "page_url": evidence.get("page_url") or page.url,

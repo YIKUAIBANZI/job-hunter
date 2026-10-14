@@ -34,6 +34,7 @@ def safe_url(url):
 
 def write_cooldown(path, reason):
     now = datetime.now().astimezone()
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({'until': (now + timedelta(hours=2)).isoformat(),
                                'reason': reason}, ensure_ascii=False), encoding='utf-8')
 

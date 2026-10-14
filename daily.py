@@ -11,6 +11,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from shared import log_path, state_path, report_path
+
 ROOT = Path(__file__).resolve().parent
 PLATFORMS = ('boss', 'liepin', 'yingjiesheng', '51job', 'yupao')
 BUCKETS = ('applied', 'pending', 'review', 'skipped', 'failed')
@@ -129,7 +131,8 @@ def render_daily(results, now, mode) -> str:
              '| 平台 | 配额 | 新增已投 | 待核验 | 复核 | 跳过 | 状态 | 日志文件 |',
              '|---|---|---|---|---|---|---|---|']
     for row in platforms:
-        logs = '、'.join(f'[{Path(path).name}]({path})' for path in row['logs']) or '—'
+        # 日报位于 reports/，子进程日志位于同级 data/，链接从日报目录解析。
+        logs = '、'.join(f'[{Path(path).name}](../{path})' for path in row['logs']) or '—'
         values = [row['platform'], row['quota'], row['applied'], row['pending'],
                   row['review'], row['skipped'], row['status']]
         lines.append('| ' + ' | '.join(_cell(v) for v in values) + f' | {logs} |')
@@ -170,6 +173,7 @@ def _read_log(path):
 
 def _run(command, path, root):
     """阻塞等待一次子进程；日志合流到磁盘，超时由 subprocess 终止子进程。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('w', encoding='utf-8') as output:
         try:
             completed = subprocess.run(command, cwd=root, stdout=output,
@@ -213,7 +217,7 @@ def run_daily(plan, *, live=False, no_rest=False, root=None) -> dict:
     root = Path(root) if root is not None else ROOT
     started = time.monotonic()
     now = datetime.now().astimezone()
-    run_dir = root / 'runs' / now.strftime('%Y-%m-%d')
+    run_dir = state_path(root, 'runs') / now.strftime('%Y-%m-%d')
     run_dir.mkdir(parents=True, exist_ok=True)
     results = {'platforms': [], 'notes': [], 'review_added': 0, 'hr_replied': None}
     ran_platform = False
@@ -228,9 +232,9 @@ def run_daily(plan, *, live=False, no_rest=False, root=None) -> dict:
         if ran_platform and not no_rest:
             time.sleep(random.uniform(60, 180))
         ran_platform = True
-        log_path = root / f'{platform}-{plan["city"]}-log.json'
+        log_file = log_path(root, platform, plan["city"])
         try:
-            baseline = _read_log(log_path)
+            baseline = _read_log(log_file)
         except (OSError, ValueError) as exc:
             row.update(status='异常', note=f'启动前日志不可读：{exc}')
             continue
@@ -250,7 +254,7 @@ def run_daily(plan, *, live=False, no_rest=False, root=None) -> dict:
             row['logs'].append(path.relative_to(root).as_posix())
             code, output = _run(command, path, root)
             try:
-                current = _read_log(log_path)
+                current = _read_log(log_file)
                 step = diff_logs(previous, current)
                 row.update(diff_logs(baseline, current))
                 previous = current
@@ -290,7 +294,7 @@ def run_daily(plan, *, live=False, no_rest=False, root=None) -> dict:
     if plan.get('tracker', False):
         steps.append(('apply_tracker', []))
     try:
-        old_reviews = _review_ids(root / '复核清单.md') if plan['review_list'] else set()
+        old_reviews = _review_ids(report_path(root, '复核清单.md')) if plan['review_list'] else set()
     except (OSError, ValueError) as exc:
         old_reviews = None
         results['review_added'] = '未能核算'
@@ -303,7 +307,7 @@ def run_daily(plan, *, live=False, no_rest=False, root=None) -> dict:
         results['notes'].append(note)
         if name == 'review_list' and code == 0:
             try:
-                new_reviews = _review_ids(root / '复核清单.md')
+                new_reviews = _review_ids(report_path(root, '复核清单.md'))
                 results['review_added'] = len(new_reviews - old_reviews) if old_reviews is not None else '未能核算'
             except (OSError, ValueError) as exc:
                 results['review_added'] = '未能核算'
@@ -314,7 +318,7 @@ def run_daily(plan, *, live=False, no_rest=False, root=None) -> dict:
             tracker = {'entries': None, 'due': None, 'note': '网申进度未生成或首部统计不可读'}
             try:
                 # 仅取文件顶部统计，正文中的备注不能影响日报计数。
-                header = '\n'.join((root / '网申进度.md').read_text(encoding='utf-8').splitlines()[:10])
+                header = '\n'.join((report_path(root, '网申进度.md')).read_text(encoding='utf-8').splitlines()[:10])
                 entries = re.search(r'^统计：入口数\s+(\d+)(?:｜|$)', header, re.M)
                 due = re.search(r'^即将截止（7 天内）：\s*(\d+)\s*个\s*$', header, re.M)
                 if entries and due:
@@ -328,7 +332,7 @@ def run_daily(plan, *, live=False, no_rest=False, root=None) -> dict:
             results['platforms'][0].update(status='风控', note=f'{name} 检测到风控，详见后处理日志')
     if not plan['review_list']:
         results['notes'].append('未启用复核清单生成')
-    inbox_path = root / '回复日报.md'
+    inbox_path = report_path(root, '回复日报.md')
     if inbox_path.exists():
         try:
             header = '\n'.join(inbox_path.read_text(encoding='utf-8').splitlines()[:12])
@@ -342,7 +346,9 @@ def run_daily(plan, *, live=False, no_rest=False, root=None) -> dict:
                              '回复日报未生成或首部统计不可读')
     results['elapsed_seconds'] = time.monotonic() - started
     results['exit_code'] = int(any(row['status'] == '风控' for row in results['platforms']))
-    (root / '日报.md').write_text(render_daily(results, now, '真投' if live else '试跑'), encoding='utf-8')
+    path = report_path(root, '日报.md')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_daily(results, now, '真投' if live else '试跑'), encoding='utf-8')
     return results
 
 

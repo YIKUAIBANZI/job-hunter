@@ -23,6 +23,7 @@ def test_parse_approved_only_complete_valid_rows():
 
 
 def test_collect_latest_cross_log_and_applied_pending(tmp_path):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
     older = row(ts='2026-10-14T10:00:00+08:00')
     newer = {**older, 'ts': '2026-10-14T03:00:00+00:00', 'job': '新标题'}
     logs = {'boss-深圳-log.json': {'review': [newer, older, row(job_id='done'), row(job_id='pending')]},
@@ -34,7 +35,7 @@ def test_collect_latest_cross_log_and_applied_pending(tmp_path):
             'boss-bad-log.json': {'review': 'invalid'}, 'boss': [], 'other': {}}
     for name, data in logs.items():
         if name.endswith('.json'):
-            (tmp_path / name).write_text(json.dumps(data))
+            (tmp_path / 'data' / 'logs' / name).write_text(json.dumps(data))
     rows = review.collect_review_rows(logs, load_applied_index(tmp_path))
     assert {f"{r['platform']}:{r['job_id']}" for r in rows} == {'boss:a', 'boss:b', 'liepin:1', '51job:1', 'yupao:2'}
     assert rows[0]['job'] == '新标题'
@@ -61,42 +62,48 @@ def test_cell_content_cannot_inject_approved_row():
 
 
 def test_regenerate_preserves_old_checks_and_city_filter(tmp_path, monkeypatch):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'reports').mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(review, '__file__', str(tmp_path / 'review_list.py'))
     for city, job_id in [('深圳', 'a'), ('北京', 'b')]:
-        (tmp_path / f'boss-{city}-log.json').write_text(json.dumps({'review': [row(job_id=job_id)]}))
-    (tmp_path / 'boss-invalid-log.json').write_text('broken')
-    path = tmp_path / review.REVIEW_FILE
+        (tmp_path / 'data' / 'logs' / f'boss-{city}-log.json').write_text(json.dumps({'review': [row(job_id=job_id)]}))
+    (tmp_path / 'data' / 'logs' / 'boss-invalid-log.json').write_text('broken')
+    path = tmp_path / 'reports' / review.REVIEW_FILE
     path.write_text(review.render_review_list([row()], {'boss:a'}))
     review.main(['--city', '深圳'])
     assert review.parse_approved(path.read_text()) == {'boss:a'}
     assert '| b |' not in path.read_text()
     review.main([])
     assert '| b |' in path.read_text() and review.parse_approved(path.read_text()) == {'boss:a'}
-    (tmp_path / 'boss-old-log.json').write_text(json.dumps({'pending': [row()]}))
+    (tmp_path / 'data' / 'logs' / 'boss-old-log.json').write_text(json.dumps({'pending': [row()]}))
     review.main([])
     assert '| a |' not in path.read_text()
 
 
 def test_approved_lookup_uses_log_url_only_and_skips_applied(tmp_path):
-    (tmp_path / 'boss-深圳-log.json').write_text(json.dumps({'review': [row()]}))
-    (tmp_path / review.REVIEW_FILE).write_text(
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'reports').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'data' / 'logs' / 'boss-深圳-log.json').write_text(json.dumps({'review': [row()]}))
+    (tmp_path / 'reports' / review.REVIEW_FILE).write_text(
         review.render_review_list([row(), row('liepin', '1'), row(job_id='not-in-log')],
                                   {'boss:a', 'liepin:1', 'boss:not-in-log'}).replace('https://example.com/job', 'https://edited.test'))
     assert review.approved_review_rows(tmp_path, 'boss', '深圳')[0]['url'] == 'https://example.com/job'
-    (tmp_path / 'boss-other-log.json').write_text(json.dumps({'applied': [row()]}))
+    (tmp_path / 'data' / 'logs' / 'boss-other-log.json').write_text(json.dumps({'applied': [row()]}))
     assert not review.approved_review_rows(tmp_path, 'boss', '深圳')
 
 
 def test_yjs_review_list_approval_regeneration_and_pending_exclusion(tmp_path,monkeypatch):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'reports').mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(review,'__file__',str(tmp_path/'review_list.py'))
     candidate={**row('yingjiesheng','123'),'url':'https://q.yingjiesheng.com/jobdetail/123.html'}
-    (tmp_path/'yingjiesheng-深圳-log.json').write_text(json.dumps({'review':[candidate]}))
-    path=tmp_path/review.REVIEW_FILE
+    (tmp_path / 'data' / 'logs' / 'yingjiesheng-深圳-log.json').write_text(json.dumps({'review':[candidate]}))
+    path=tmp_path / 'reports' / review.REVIEW_FILE
     path.write_text(review.render_review_list([candidate],{'yingjiesheng:123'}))
     review.main(['--city','深圳'])
     assert review.parse_approved(path.read_text())=={'yingjiesheng:123'}
     assert review.approved_review_rows(tmp_path,'yingjiesheng','深圳')[0]['url']==candidate['url']
-    (tmp_path/'yingjiesheng-北京-log.json').write_text(json.dumps({'pending':[candidate]}))
+    (tmp_path / 'data' / 'logs' / 'yingjiesheng-北京-log.json').write_text(json.dumps({'pending':[candidate]}))
     review.main(['--city','深圳'])
     assert '| 123 |' not in path.read_text()
     assert not review.approved_review_rows(tmp_path,'yingjiesheng','深圳')

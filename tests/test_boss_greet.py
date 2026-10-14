@@ -34,7 +34,8 @@ def test_pick_targets_ignores_pending_and_bad_ts():
 
 
 def test_greeted_roundtrip_and_corrupt(tmp_path):
-    path = tmp_path / "boss-greet.json"
+    (tmp_path / 'data').mkdir(parents=True, exist_ok=True)
+    path = tmp_path / 'data' / "boss-greet.json"
     assert load_greeted(path) == {}
     save_greeted(path, {"a": {"status": "sent"}})
     assert load_greeted(path) == {"a": {"status": "sent"}}

@@ -122,12 +122,13 @@ def _write_log(path, applied):
 
 
 def test_load_applied_index_aggregates_all_logs(tmp_path):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
     _write_log(
-        tmp_path / "boss-深圳-log.json",
+        tmp_path / 'data' / 'logs' / "boss-深圳-log.json",
         [{"company": "腾讯", "job": "产品经理"}],
     )
     _write_log(
-        tmp_path / "liepin-上海-x-log.json",
+        tmp_path / 'data' / 'logs' / "liepin-上海-x-log.json",
         [{"company": "阿里", "job": "运营"}],
     )
     idx = load_applied_index(tmp_path)
@@ -137,45 +138,52 @@ def test_load_applied_index_aggregates_all_logs(tmp_path):
 
 
 def test_load_applied_index_skips_empty_keys(tmp_path):
-    _write_log(tmp_path / "yupao-x-log.json", [{"job": ""}])
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    _write_log(tmp_path / 'data' / 'logs' / "yupao-x-log.json", [{"job": ""}])
     assert load_applied_index(tmp_path) == set()
 
 
 def test_load_applied_index_tolerates_missing_and_bad_files(tmp_path):
-    (tmp_path / "broken-log.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'data' / 'logs' / "broken-log.json").write_text("{not json", encoding="utf-8")
     # 目录里没有合法 applied 记录也不应抛异常
     assert load_applied_index(tmp_path) == set()
 
 
 def test_load_applied_index_missing_company_uses_title(tmp_path):
-    _write_log(tmp_path / "51job-x-log.json", [{"job": "数据分析"}])
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    _write_log(tmp_path / 'data' / 'logs' / "51job-x-log.json", [{"job": "数据分析"}])
     idx = load_applied_index(tmp_path)
     assert dedup_key("", "数据分析") in idx
 
 
 @pytest.mark.parametrize("bucket", ["applied", "pending"])
 def test_load_applied_index_includes_boss_id_and_legacy_key(tmp_path, bucket):
-    (tmp_path / "boss-深圳-log.json").write_text(json.dumps({bucket: [
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'data' / 'logs' / "boss-深圳-log.json").write_text(json.dumps({bucket: [
         {"platform": "boss", "job_id": "job123", "company": "腾讯", "job": "产品经理"},
     ]}), encoding="utf-8")
     assert load_applied_index(tmp_path) == {"boss:job123", dedup_key("腾讯", "产品经理")}
 
 
 def test_load_applied_index_pending_without_id_keeps_legacy_key(tmp_path):
-    (tmp_path / "boss-x-log.json").write_text(json.dumps({"pending": [
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'data' / 'logs' / "boss-x-log.json").write_text(json.dumps({"pending": [
         {"company": "腾讯", "job": "产品经理"},
     ]}), encoding="utf-8")
     assert load_applied_index(tmp_path) == {dedup_key("腾讯", "产品经理")}
 
 
 def test_load_applied_index_id_does_not_require_company_or_title(tmp_path):
-    _write_log(tmp_path / "boss-x-log.json", [{"job_id": "only-id"}])
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    _write_log(tmp_path / 'data' / 'logs' / "boss-x-log.json", [{"job_id": "only-id"}])
     assert load_applied_index(tmp_path) == {"boss:only-id"}
 
 
 @pytest.mark.parametrize('bucket', ['applied','pending'])
 def test_yjs_index_namespaces_ids_and_legacy_company_key(tmp_path,bucket):
-    (tmp_path/'yingjiesheng-深圳-log.json').write_text(json.dumps({bucket:[
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'data' / 'logs' / 'yingjiesheng-深圳-log.json').write_text(json.dumps({bucket:[
         {'job_id':'123','company':'公司A','job':'产品经理'},
         {'jobId':'456'},
     ]}))
@@ -183,8 +191,9 @@ def test_yjs_index_namespaces_ids_and_legacy_company_key(tmp_path,bucket):
 
 
 def test_load_applied_index_excludes_unsubmitted_buckets(tmp_path):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
     entry = {"job_id": "job123", "company": "腾讯", "job": "产品经理"}
-    (tmp_path / "boss-x-log.json").write_text(json.dumps({
+    (tmp_path / 'data' / 'logs' / "boss-x-log.json").write_text(json.dumps({
         "skipped": [entry], "failed": [entry], "dry_run": [entry], "review": [entry],
     }), encoding="utf-8")
     assert load_applied_index(tmp_path) == set()
@@ -194,7 +203,8 @@ def test_load_applied_index_excludes_unsubmitted_buckets(tmp_path):
 
 
 def test_load_log_adds_pending_to_legacy_file_without_losing_entries(tmp_path):
-    path = tmp_path / "boss-x-log.json"
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    path = tmp_path / 'data' / 'logs' / "boss-x-log.json"
     entry = {"company": "腾讯", "job": "产品经理"}
     _write_log(path, [entry])
     log = load_log(path)
@@ -203,13 +213,14 @@ def test_load_log_adds_pending_to_legacy_file_without_losing_entries(tmp_path):
 
 
 def test_load_log_preserves_existing_pending(tmp_path):
-    path = tmp_path / "boss-x-log.json"
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    path = tmp_path / 'data' / 'logs' / "boss-x-log.json"
     path.write_text(json.dumps({"pending": [{"job_id": "job123"}]}), encoding="utf-8")
     assert load_log(path)["pending"] == [{"job_id": "job123"}]
 
 
 def test_load_log_new_file_includes_pending(tmp_path):
-    assert load_log(tmp_path / "new-log.json") == {
+    assert load_log(tmp_path / 'data' / 'logs' / "new-log.json") == {
         "applied": [], "pending": [], "review": [], "skipped": [], "failed": [],
     }
 
@@ -299,7 +310,7 @@ def test_parse_approved_keeps_cooldown_pacing_and_limits(flags):
 
 
 def test_record_appends_and_persists(tmp_path):
-    log_file = tmp_path / "t-log.json"
+    log_file = tmp_path / 'data' / 'logs' / "t-log.json"
     log = {"applied": [], "skipped": [], "failed": []}
     record(log, log_file, "applied", {"company": "腾讯", "job": "产品"})
     record(log, log_file, "skipped", {"job": "低分岗", "score": 10})
@@ -311,8 +322,9 @@ def test_record_appends_and_persists(tmp_path):
 
 @pytest.mark.parametrize("offset", [-60, 0, 120])
 def test_cooldown_remaining(tmp_path, offset):
+    (tmp_path / 'data' / 'cooldown').mkdir(parents=True, exist_ok=True)
     now = datetime(2026, 10, 14, 12, tzinfo=timezone(timedelta(hours=8)))
-    path = tmp_path / "boss-cooldown.json"
+    path = tmp_path / 'data' / 'cooldown' / "boss-cooldown.json"
     assert cooldown_remaining(path, now) is None
     until = (now + timedelta(minutes=offset)).astimezone(timezone.utc)
     path.write_text(json.dumps({"until": until.isoformat(), "reason": "验证"}))
@@ -324,7 +336,8 @@ def test_cooldown_remaining(tmp_path, offset):
 
 @pytest.mark.parametrize("content", ["broken", "null", "[]", "{}", '{"until":"bad"}'])
 def test_cooldown_remaining_invalid(tmp_path, content):
-    path = tmp_path / "boss-cooldown.json"
+    (tmp_path / 'data' / 'cooldown').mkdir(parents=True, exist_ok=True)
+    path = tmp_path / 'data' / 'cooldown' / "boss-cooldown.json"
     path.write_text(content)
     assert cooldown_remaining(path, datetime.now().astimezone()) is None
 
@@ -350,14 +363,15 @@ def test_boss_match_policy_defaults_to_review_gate():
 def test_boss_apply_uses_effective_decision():
     # Boss 详情评分后必须经过 review-gate，不能直接用方案 B 结果
     from pathlib import Path
-    src = (Path(__file__).parent / "boss_apply.py").read_text()
+    src = (Path(__file__).resolve().parents[1] / "boss_apply.py").read_text()
     assert 'decision = effective_decision(result, args.match_policy)' in src
 
 
 def test_applied_index_shares_ids_between_yingjiesheng_and_51job(tmp_path):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
     import json
     from shared import load_applied_index
-    (tmp_path / 'yingjiesheng-深圳-log.json').write_text(json.dumps(
+    (tmp_path / 'data' / 'logs' / 'yingjiesheng-深圳-log.json').write_text(json.dumps(
         {'applied': [{'platform': 'yingjiesheng', 'job_id': '167341639', 'company': '九联', 'job': '产品助理'}]}))
     index = load_applied_index(tmp_path)
     assert {'yingjiesheng:167341639', '51job:167341639'} <= index

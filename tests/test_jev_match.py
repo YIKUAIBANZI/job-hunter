@@ -154,7 +154,7 @@ def test_call_jev_parse_errors(monkeypatch, body):
 def test_cache_hit_and_changed_jd_miss(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(jev, "call_jev", lambda *a: calls.append(a) or answers())
-    path = tmp_path / "jev-cache.json"
+    path = tmp_path / 'data' / 'cache' / "jev-cache.json"
     first = jev.match_job("job1", "职责一", "private-state", "private-key", path)
     assert jev.match_job("job1", "职责一", "private-state", "private-key", path) == first
     assert len(calls) == 1
@@ -170,8 +170,9 @@ def test_cache_hit_and_changed_jd_miss(monkeypatch, tmp_path):
 
 
 def test_invalid_cache_is_replaced(monkeypatch, tmp_path):
+    (tmp_path / 'data' / 'cache').mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(jev, "call_jev", lambda *a: answers())
-    path = tmp_path / "jev-cache.json"
+    path = tmp_path / 'data' / 'cache' / "jev-cache.json"
     path.write_text("{invalid")
     assert jev.match_job("1", "JD", "state", "key", path)["decision"]["decision"] == "apply"
     path.write_text(json.dumps({jev.cache_key("1", "JD"): {"answers": {}}}))
@@ -233,10 +234,11 @@ def test_call_title_jev_invalid(monkeypatch, body):
 
 
 def test_title_cache_hit_refresh_and_invalid_entry(monkeypatch, tmp_path):
+    (tmp_path / 'data' / 'cache').mkdir(parents=True, exist_ok=True)
     answer = {"choice": "1", "probabilities": {"1": 0.9, "0": 0.1}}
     calls = []
     monkeypatch.setattr(jev, "call_title_jev", lambda *a: calls.append(a) or answer)
-    path = tmp_path / "jev-cache.json"
+    path = tmp_path / 'data' / 'cache' / "jev-cache.json"
     for _ in range(2):
         assert jev.match_title("a", "private-state", "private-key", path) == (True, "标题粗筛无关 p=0.90")
     assert len(calls) == 1
@@ -250,9 +252,10 @@ def test_title_cache_hit_refresh_and_invalid_entry(monkeypatch, tmp_path):
 
 
 def test_match_job_writes_latest_on_new_and_cached_jd(monkeypatch, tmp_path):
+    (tmp_path / 'data' / 'cache').mkdir(parents=True, exist_ok=True)
     calls = []
     monkeypatch.setattr(jev, "call_jev", lambda *a: calls.append(a) or answers())
-    path = tmp_path / "jev-cache.json"
+    path = tmp_path / 'data' / 'cache' / "jev-cache.json"
     first = jev.match_job("a", "JD", "state", "key", path)
     assert json.loads(path.read_text())["latest:a"] == {"decision": first["decision"], "ts": first["ts"]}
     cache = json.loads(path.read_text())
@@ -270,9 +273,10 @@ def test_match_job_writes_latest_on_new_and_cached_jd(monkeypatch, tmp_path):
     (timedelta(days=7), False), (timedelta(days=8), False), (timedelta(seconds=-1), False),
 ])
 def test_latest_match_age(tmp_path, age, hit):
+    (tmp_path / 'data' / 'cache').mkdir(parents=True, exist_ok=True)
     now = datetime(2026, 10, 14, tzinfo=timezone.utc)
     cached = {"decision": jev.decide(answers(hard=0.45)), "ts": (now - age).isoformat()}
-    path = tmp_path / "jev-cache.json"
+    path = tmp_path / 'data' / 'cache' / "jev-cache.json"
     path.write_text(json.dumps({"latest:a": cached}))
     original = path.read_text()
     assert jev.latest_match("a", path, now) == (cached if hit else None)
@@ -283,7 +287,8 @@ def test_latest_match_age(tmp_path, age, hit):
 @pytest.mark.parametrize("entry", [None, {}, {"ts": "bad", "decision": {}},
                                     {"ts": "2026-10-14T00:00:00+00:00", "decision": {}}])
 def test_latest_match_invalid(tmp_path, entry):
-    path = tmp_path / "jev-cache.json"
+    (tmp_path / 'data' / 'cache').mkdir(parents=True, exist_ok=True)
+    path = tmp_path / 'data' / 'cache' / "jev-cache.json"
     now = datetime(2026, 10, 14, tzinfo=timezone.utc)
     assert jev.latest_match("a", path, now) is None
     path.write_text(json.dumps({"latest:a": entry}))
@@ -314,10 +319,11 @@ def test_load_key_default_home_file(monkeypatch, tmp_path):
 
 
 def test_config_defaults_and_review_bucket(tmp_path):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
     assert DEFAULT_CONFIG["job_profile"] == ""
     assert DEFAULT_CONFIG["resume_redact"] == []
     assert load_config(tmp_path)["resume_redact"] == []
-    path = tmp_path / "boss-x-log.json"
+    path = tmp_path / 'data' / 'logs' / "boss-x-log.json"
     path.write_text(json.dumps({"review": [{"job_id": "1"}]}))
     assert load_log(path)["review"] == [{"job_id": "1"}]
 

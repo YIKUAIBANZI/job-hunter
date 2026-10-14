@@ -15,7 +15,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from boss_apply import page_block_reason
-from shared import connect_chrome, cooldown_remaining, load_config, load_log
+from shared import (connect_chrome, cooldown_remaining, load_config, load_log,
+                    log_path, cooldown_path, state_path)
 
 CHAT_URL = "https://www.zhipin.com/web/geek/chat"
 SEND_INTERVAL = (20, 60)
@@ -65,6 +66,7 @@ def load_greeted(path: Path) -> dict:
 
 
 def save_greeted(path: Path, greeted: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".json.tmp")
     temp.write_text(json.dumps(greeted, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(path)
@@ -144,8 +146,8 @@ def main(argv=None):
 
     root = Path(__file__).parent
     cfg = load_config()
-    log = load_log(root / f"boss-{args.city}-log.json")
-    greeted_file = root / "boss-greet.json"
+    log = load_log(log_path(root, "boss", args.city))
+    greeted_file = state_path(root, "boss-greet.json")
     greeted = load_greeted(greeted_file)
     now = datetime.now().astimezone()
     targets = pick_targets(log, greeted, now, args.since_days)
@@ -159,7 +161,7 @@ def main(argv=None):
     if not args.send or not targets:
         return 0
 
-    cooldown_file = root / "boss-cooldown.json"
+    cooldown_file = cooldown_path(root, "boss")
     if not args.ignore_cooldown:
         left = cooldown_remaining(cooldown_file, now)
         if left:

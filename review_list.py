@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from shared import load_applied_index
+from shared import load_applied_index, report_path
 
 PLATFORMS = ('boss', 'liepin', 'yingjiesheng', '51job', 'yupao')
 REVIEW_FILE = '复核清单.md'
@@ -102,7 +102,7 @@ def render_review_list(rows, approved) -> str:
 def load_review_rows(root, city=None):
     """只读取四个平台的岗位日志；去重索引始终覆盖所有城市。"""
     logs = {}
-    for path in sorted(root.glob('*-log.json')):
+    for path in sorted((root / 'data' / 'logs').glob('*-log.json')):
         match = re.fullmatch(r'(boss|liepin|yingjiesheng|51job|yupao)-(.+)-log\.json', path.name)
         if not match or city is not None and match[2] != city:
             continue
@@ -114,7 +114,7 @@ def load_review_rows(root, city=None):
 
 
 def approved_review_rows(root, platform, city):
-    path = root / REVIEW_FILE
+    path = report_path(root, REVIEW_FILE)
     approved = parse_approved(path.read_text(encoding='utf-8')) if path.exists() else set()
     return [r for r in load_review_rows(root, city)
             if r['platform'] == platform and f"{platform}:{r['job_id']}" in approved]
@@ -125,9 +125,10 @@ def main(argv=None):
     parser.add_argument('--city', help='只收集该城市，默认收集全部城市')
     args = parser.parse_args(argv)
     root = Path(__file__).parent
-    path = root / REVIEW_FILE
+    path = report_path(root, REVIEW_FILE)
     approved = parse_approved(path.read_text(encoding='utf-8')) if path.exists() else set()
     rows = load_review_rows(root, args.city)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_review_list(rows, approved), encoding='utf-8')
     print(f'复核岗位 {len(rows)} 个：{path}')
 

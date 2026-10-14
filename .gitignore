@@ -4,6 +4,11 @@ resume.md
 resume.pdf
 resume.txt
 resume.docx
+resume.*
+
+# 新布局的运行时文件；旧根目录规则继续兼容未迁移用户
+data/
+reports/
 
 # 投递日志
 *-log.json

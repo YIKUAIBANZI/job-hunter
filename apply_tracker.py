@@ -11,6 +11,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from official_apply import is_aggregator
 
+from shared import cache_path, report_path
+
 ROOT = Path(__file__).resolve().parent
 STATES = ('未投', '已投', '笔试/测评', '面试', 'Offer', '结束')
 HEADERS = ('公司', '入口', '核验', '截止日期', '状态', '备注', '来源岗位')
@@ -195,15 +197,16 @@ def main(argv=None):
     manual = [{'company': company.strip(), 'url': url} for company, url in args.add or []]
     if any(not item['company'] or not _valid_url(item['url']) for item in manual):
         parser.error('--add 需要非空公司名及有效的 HTTP(S) URL')
-    path = ROOT / '网申进度.md'
+    path = report_path(ROOT, '网申进度.md')
     try:
-        cache_path = ROOT / 'official-cache.json'
-        cache = json.loads(cache_path.read_text(encoding='utf-8')) if cache_path.exists() else {}
+        cache_file = cache_path(ROOT, 'official-cache.json')
+        cache = json.loads(cache_file.read_text(encoding='utf-8')) if cache_file.exists() else {}
         if not isinstance(cache, dict):
             raise ValueError('official-cache.json 必须是 JSON 对象')
         previous = parse_tracker(path.read_text(encoding='utf-8')) if path.exists() else {}
         rows = build_rows(cache, previous, manual)
         now = datetime.now().astimezone()
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(render_tracker(rows, now), encoding='utf-8')
     except (OSError, ValueError) as exc:
         parser.error(str(exc))

@@ -119,6 +119,8 @@ def test_render_empty_and_unmatched():
 
 @pytest.fixture
 def offline(monkeypatch, tmp_path):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'reports').mkdir(parents=True, exist_ok=True)
     import apply_runtime
     import boss_apply
     import shared
@@ -193,9 +195,9 @@ def offline(monkeypatch, tmp_path):
         return '验证码' if tab.phase == state['block_phase'] else ''
 
     monkeypatch.setattr(boss_apply, 'page_block_reason', block)
-    path = tmp_path / report.REPORT_FILE
+    path = tmp_path / 'reports' / report.REPORT_FILE
     path.write_text('上次日报', encoding='utf-8')
-    (tmp_path / 'boss-深圳-log.json').write_text(json.dumps({'applied': [
+    (tmp_path / 'data' / 'logs' / 'boss-深圳-log.json').write_text(json.dumps({'applied': [
         dict(company='公司0', job='产品实习', ts=NOW.isoformat())]}), encoding='utf-8')
     return SimpleNamespace(state=state, tabs=tabs, sleeps=sleeps, checks=checks,
                            root=tmp_path, path=path, connections=connections,
@@ -218,16 +220,25 @@ def test_main_readonly_bounds_and_own_tab_cleanup(offline, no_liepin, capsys):
     assert sum(phase == 'boss_read' for _, phase in h.checks) >= 6
 
 
+def test_main_creates_report_parent(offline):
+    h = offline
+    h.path.unlink()
+    h.path.parent.rmdir()
+    assert report.main(['--no-liepin']) == 0
+    assert h.path.is_file()
+
+
 @pytest.mark.parametrize('phase', ['navigated', 'boss_read', 'scroll', 'liepin_read'])
 def test_block_no_report_or_log_writes_and_cleanup(offline, phase, capsys):
     h = offline
-    before = {p.name: p.read_bytes() for p in h.root.iterdir()}
+    before = {p.relative_to(h.root): p.read_bytes() for p in h.root.rglob('*') if p.is_file()}
     h.state['block_phase'] = phase
     assert report.main([]) == 1
     assert all(tab.closed for tab in h.tabs)
-    assert {p.name for p in h.root.iterdir()} == set(before) | {'boss-cooldown.json'}
+    assert {p.relative_to(h.root).as_posix() for p in h.root.rglob('*') if p.is_file()} == {
+        p.as_posix() for p in before} | {'data/cooldown/boss-cooldown.json'}
     assert all((h.root / name).read_bytes() == data for name, data in before.items())
-    data = json.loads((h.root / 'boss-cooldown.json').read_text())
+    data = json.loads((h.root / 'data' / 'cooldown' / 'boss-cooldown.json').read_text())
     assert data['reason'] == '验证码'
     remaining = datetime.fromisoformat(data['until']) - datetime.now().astimezone()
     assert timedelta(hours=1, minutes=59) < remaining <= timedelta(hours=2)
@@ -236,8 +247,8 @@ def test_block_no_report_or_log_writes_and_cleanup(offline, phase, capsys):
 
 def test_cooldown_no_connect_or_writes(offline):
     h = offline
-    h.write_cooldown(h.root / 'boss-cooldown.json', '已有风控')
-    before = {p.name: p.read_bytes() for p in h.root.iterdir()}
+    h.write_cooldown(h.root / 'data' / 'cooldown' / 'boss-cooldown.json', '已有风控')
+    before = {p.relative_to(h.root): p.read_bytes() for p in h.root.rglob('*') if p.is_file()}
     assert report.main([]) == 1 and not h.connections
     assert all((h.root / name).read_bytes() == data for name, data in before.items())
 

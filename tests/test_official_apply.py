@@ -118,6 +118,7 @@ def test_other_kind(url):
 
 
 def test_collect_logs_deduplicates_merges_and_honors_buckets(tmp_path):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
     data = {
         "applied": [{"company": " A C M E ", "job": "产品", "url": "https://boss.example/a"},
                     {"company": "\t\n", "job": "空公司"}, {}, None, {"company": 1}],
@@ -128,13 +129,13 @@ def test_collect_logs_deduplicates_merges_and_honors_buckets(tmp_path):
         "failed": [{"company": "失败后待投", "decision": "apply"}, {"company": "失败未决"}],
         "dry_run": [{"company": "待投", "decision": "apply"}], "metadata": "ignore",
     }
-    (tmp_path / "boss-a-log.json").write_text(json.dumps(data))
-    (tmp_path / "boss-b-log.json").write_text(json.dumps({
+    (tmp_path / 'data' / 'logs' / "boss-a-log.json").write_text(json.dumps(data))
+    (tmp_path / 'data' / 'logs' / "boss-b-log.json").write_text(json.dumps({
         "applied": [{"company": "acme", "job": "产品", "url": "https://boss.example/a"}]}))
-    (tmp_path / "boss-broken-log.json").write_text("{")
-    (tmp_path / "boss-list-log.json").write_text("[]")
-    (tmp_path / "boss-bad-bucket-log.json").write_text('{"applied": {}}')
-    (tmp_path / "lagou-a-log.json").write_text(json.dumps(data))
+    (tmp_path / 'data' / 'logs' / "boss-broken-log.json").write_text("{")
+    (tmp_path / 'data' / 'logs' / "boss-list-log.json").write_text("[]")
+    (tmp_path / 'data' / 'logs' / "boss-bad-bucket-log.json").write_text('{"applied": {}}')
+    (tmp_path / 'data' / 'logs' / "lagou-a-log.json").write_text(json.dumps(data))
     rows = official.collect_companies(tmp_path)
     assert len(rows) == 5
     assert rows[0] == {"company": "A C M E", "jobs": ["产品", "研发"],
@@ -382,7 +383,8 @@ def test_cache_changed_first_job_does_not_reuse_old_job_match():
 
 
 def test_cache_files_roundtrip_and_broken_cache(tmp_path):
-    path = tmp_path / "official-cache.json"
+    (tmp_path / 'data' / 'cache').mkdir(parents=True, exist_ok=True)
+    path = tmp_path / 'data' / 'cache' / "official-cache.json"
     assert official.load_cache(path) == {}
     for content in ("{", "[]", "null"):
         path.write_text(content)
@@ -475,23 +477,24 @@ def test_cli_end_to_end_cache_and_refresh_mocking_only_http(cli, monkeypatch, ca
     args = ["--company", "示例科技", "--job", "产品实习"]
     assert official.main(args) == 0
     assert len(calls) == 4  # 两次搜索、一次 Jev、一次只读 GET。
-    cache_text = (cli / "official-cache.json").read_text()
+    cache_text = (cli / 'data' / 'cache' / "official-cache.json").read_text()
     cache = json.loads(cache_text)
     assert cache["示例科技"]["result"]["candidates"][0]["status"] == "已核验"
     cache_ts = cache["示例科技"]["ts"]
     assert official.main(args) == 0 and len(calls) == 4
-    assert "缓存 1 家" in (cli / "官网投递.md").read_text()
-    assert json.loads((cli / "official-cache.json").read_text())["示例科技"]["ts"] == cache_ts
+    assert "缓存 1 家" in (cli / 'reports' / "官网投递.md").read_text()
+    assert json.loads((cli / 'data' / 'cache' / "official-cache.json").read_text())["示例科技"]["ts"] == cache_ts
     assert official.main([*args, "--refresh"]) == 0 and len(calls) == 8
-    assert "缓存 0 家" in (cli / "官网投递.md").read_text()
+    assert "缓存 0 家" in (cli / 'reports' / "官网投递.md").read_text()
     stdout, stderr = capsys.readouterr()
-    saved = cache_text + (cli / "官网投递.md").read_text() + stdout + stderr
+    saved = cache_text + (cli / 'reports' / "官网投递.md").read_text() + stdout + stderr
     assert TAVILY_KEY not in saved and JEV_KEY not in saved
     assert "https://jobs.example.com/role?x=1&amp;y=2" in saved
 
 
 def test_cli_limit_cached_companies_do_not_starve_later_rows(cli, monkeypatch):
-    (cli / "boss-test-log.json").write_text(json.dumps({"applied": [
+    (cli / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    (cli / 'data' / 'logs' / "boss-test-log.json").write_text(json.dumps({"applied": [
         {"company": f"公司{i}", "job": "产品"} for i in range(3)]}))
     searches = []
 
@@ -502,22 +505,23 @@ def test_cli_limit_cached_companies_do_not_starve_later_rows(cli, monkeypatch):
     monkeypatch.setattr(official, "find_official", find)
     assert official.main(["--limit", "1"]) == 0 and searches == ["公司0"]
     assert official.main(["--limit", "1"]) == 0 and searches == ["公司0", "公司1"]
-    assert "查了 2 家" in (cli / "官网投递.md").read_text()
+    assert "查了 2 家" in (cli / 'reports' / "官网投递.md").read_text()
     assert official.main(["--limit", "1", "--refresh"]) == 0
     assert searches == ["公司0", "公司1", "公司0"]
 
 
 def test_cli_failures_not_cached_and_previous_report_replaced(cli, monkeypatch, capsys):
-    (cli / "官网投递.md").write_text("过时内容")
+    (cli / 'reports').mkdir(parents=True, exist_ok=True)
+    (cli / 'reports' / "官网投递.md").write_text("过时内容")
 
     def urlopen(*args, **kwargs):
         raise URLError(TAVILY_KEY)
 
     monkeypatch.setattr(official.request, "urlopen", urlopen)
     assert official.main(["--company", "示例科技", "--job", "产品"]) == 1
-    report = (cli / "官网投递.md").read_text()
+    report = (cli / 'reports' / "官网投递.md").read_text()
     assert "过时内容" not in report and "查询异常" in report
-    assert json.loads((cli / "official-cache.json").read_text()) == {}
+    assert json.loads((cli / 'data' / 'cache' / "official-cache.json").read_text()) == {}
     stdout, stderr = capsys.readouterr()
     assert TAVILY_KEY not in stdout + stderr + report
 
@@ -527,7 +531,7 @@ def test_cli_missing_key_exits_without_writing(cli, monkeypatch, missing, capsys
     monkeypatch.setattr(official, f"load_{missing}_key", lambda: "")
     assert official.main(["--company", "示例科技"]) == 1
     assert "缺少" in capsys.readouterr().err
-    assert not (cli / "官网投递.md").exists() and not (cli / "official-cache.json").exists()
+    assert not (cli / 'reports' / "官网投递.md").exists() and not (cli / 'data' / 'cache' / "official-cache.json").exists()
 
 
 @pytest.mark.parametrize("args", [["--limit", "0"], ["--limit", "-1"], ["--job", "产品"], ["--company", " "]])

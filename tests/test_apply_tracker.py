@@ -169,29 +169,33 @@ def test_title_truncated_to_30_characters():
 
 def test_cli_manual_missing_cache_and_rebuild(tmp_path, capsys):
     assert tracker.main(['--add', '公司A', 'https://example.test/jobs/?source=x']) == 0
-    md = (tmp_path / '网申进度.md').read_text()
+    md = (tmp_path / 'reports' / '网申进度.md').read_text()
     assert '手动' in md and '未投' in md
     assert '入口 1 个' in capsys.readouterr().out
     assert tracker.main([]) == 0
-    assert len(tracker.parse_tracker((tmp_path / '网申进度.md').read_text())) == 1
+    assert len(tracker.parse_tracker((tmp_path / 'reports' / '网申进度.md').read_text())) == 1
     assert len(capsys.readouterr().out.splitlines()) == 1
-    assert not (tmp_path / 'official-cache.json').exists()
+    assert not (tmp_path / 'data' / 'cache' / 'official-cache.json').exists()
 
 
 def test_cli_cache_and_existing_user_fields(tmp_path):
-    (tmp_path / 'official-cache.json').write_text(json.dumps(cache(candidate('campus'))))
+    (tmp_path / 'data' / 'cache').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'reports').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'data' / 'cache' / 'official-cache.json').write_text(json.dumps(cache(candidate('campus'))))
     old = tracker.render_tracker([row(deadline='2026-10-19', status='已投', note='已完成申请')], NOW)
-    (tmp_path / '网申进度.md').write_text(old)
+    (tmp_path / 'reports' / '网申进度.md').write_text(old)
     assert tracker.main([]) == 0
-    updated = tracker.parse_tracker((tmp_path / '网申进度.md').read_text())
+    updated = tracker.parse_tracker((tmp_path / 'reports' / '网申进度.md').read_text())
     assert next(iter(updated.values()))['note'] == '已完成申请'
 
 
 @pytest.mark.parametrize('content', ['{坏缓存', '[]'])
 def test_corrupt_cache_preserves_existing_file(tmp_path, content):
-    path = tmp_path / '网申进度.md'
+    (tmp_path / 'data' / 'cache').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'reports').mkdir(parents=True, exist_ok=True)
+    path = tmp_path / 'reports' / '网申进度.md'
     path.write_text('旧进度')
-    (tmp_path / 'official-cache.json').write_text(content)
+    (tmp_path / 'data' / 'cache' / 'official-cache.json').write_text(content)
     with pytest.raises(SystemExit) as exc:
         tracker.main([])
     assert exc.value.code == 2 and path.read_text() == '旧进度'
@@ -203,7 +207,7 @@ def test_corrupt_cache_preserves_existing_file(tmp_path, content):
 def test_cli_invalid_manual_no_write(tmp_path, args):
     with pytest.raises(SystemExit) as exc:
         tracker.main(args)
-    assert exc.value.code == 2 and not (tmp_path / '网申进度.md').exists()
+    assert exc.value.code == 2 and not (tmp_path / 'reports' / '网申进度.md').exists()
 
 
 def test_build_rows_drops_aggregator_from_stale_cache():

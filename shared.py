@@ -13,6 +13,37 @@ from jev_match import DEFAULT_PROFILE_TEXT
 
 BOSS_JOB_ID_PATTERN = r"(?:^|/)job_detail/([A-Za-z0-9_-]+)\.html$"
 
+
+def log_path(root, platform, city) -> Path:
+    """岗位日志路径；只计算路径，不创建目录。"""
+    return Path(root) / 'data' / 'logs' / f'{platform}-{city}-log.json'
+
+
+def cooldown_path(root, platform) -> Path:
+    """平台冷却状态路径。"""
+    return Path(root) / 'data' / 'cooldown' / f'{platform}-cooldown.json'
+
+
+def cache_path(root, name) -> Path:
+    """模型及官网缓存路径。"""
+    return Path(root) / 'data' / 'cache' / name
+
+
+def state_path(root, name) -> Path:
+    """其他程序状态路径，包括 runs 和 evidence。"""
+    return Path(root) / 'data' / name
+
+
+def report_path(root, name) -> Path:
+    """供人阅读、勾选的报告路径。"""
+    return Path(root) / 'reports' / name
+
+
+def queue_path(root, platform, city) -> Path:
+    """本轮平台队列路径。"""
+    return report_path(root, '队列') / f'{platform}-{city}-队列.md'
+
+
 DEFAULT_CONFIG = {
     "city": "深圳",
     "matcher": "jev",
@@ -58,6 +89,7 @@ def load_log(log_file: Path) -> dict:
 
 
 def save_log(log: dict, log_file: Path):
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     temp = log_file.with_suffix(".json.tmp")
     temp.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(log_file)
@@ -266,7 +298,7 @@ def load_applied_index(skill_dir: Path | None = None) -> set[str]:
     """
     skill_dir = skill_dir or Path(__file__).parent
     index: set[str] = set()
-    for log_file in skill_dir.glob("*-log.json"):
+    for log_file in (skill_dir / 'data' / 'logs').glob("*-log.json"):
         try:
             data = json.loads(log_file.read_text(encoding="utf-8"))
         except Exception:

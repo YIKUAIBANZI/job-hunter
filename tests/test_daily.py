@@ -38,6 +38,8 @@ def offline(monkeypatch, tmp_path):
 
 @pytest.fixture
 def harness(monkeypatch, tmp_path):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'reports').mkdir(parents=True, exist_ok=True)
     calls = []
     actions = []
     def run(command, **kwargs):
@@ -53,7 +55,7 @@ def harness(monkeypatch, tmp_path):
             raise action['exception']
         platform = command[1].removesuffix('_apply.py')
         if platform in daily.PLATFORMS:
-            path = tmp_path / f'{platform}-深圳-log.json'
+            path = tmp_path / 'data' / 'logs' / f'{platform}-深圳-log.json'
             log = json.loads(path.read_text()) if path.exists() else {}
             for bucket, rows in action.get('add', {}).items():
                 log.setdefault(bucket, []).extend(rows)
@@ -62,7 +64,9 @@ def harness(monkeypatch, tmp_path):
             else:
                 write_json(path, log)
         for name, content in action.get('files', {}).items():
-            (tmp_path / name).write_text(content, encoding='utf-8')
+            path = tmp_path / 'reports' / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding='utf-8')
         kwargs['stdout'].write(action.get('output', ''))
         return SimpleNamespace(returncode=action.get('code', 0))
     monkeypatch.setattr(daily.subprocess, 'run', run)
@@ -158,17 +162,18 @@ def test_main_mode_order_arguments_and_summary(harness, capsys, live):
         assert ('--dry-run' in command) is not live
     assert '--experience' in harness.calls[1]
     assert len(capsys.readouterr().out.splitlines()) == 1
-    md = (harness.root / '日报.md').read_text()
+    md = (harness.root / 'reports' / '日报.md').read_text()
     assert ('真投' if live else '试跑') in md
     assert '| boss | 1 |' in md
-    logs = list((harness.root / 'runs').rglob('*.log'))
+    logs = list((harness.root / 'data' / 'runs').rglob('*.log'))
     assert len(logs) == 5 and any(p.name == 'yingjiesheng-1.log' for p in logs)
+    assert all(f'](../{p.relative_to(harness.root).as_posix()})' in md for p in logs)
 
 
 def test_yjs_daily_order_example_and_old_plan_rejection(tmp_path):
     from pathlib import Path
     assert daily.PLATFORMS == ('boss','liepin','yingjiesheng','51job','yupao')
-    example = json.loads((Path(__file__).parent / 'daily.example.json').read_text())
+    example = json.loads((Path(__file__).resolve().parents[1] / 'daily.example.json').read_text())
     assert example['platforms']['yingjiesheng'] == {'quota':0,'keywords':['产品经理'],'args':[]}
     path = tmp_path / 'daily.json'
     write_json(path, example)
@@ -186,21 +191,21 @@ def test_invalid_main_plan_stops_before_processes(harness):
     with pytest.raises(SystemExit) as exc:
         daily.main(['--live', '--no-rest'])
     assert exc.value.code == 2 and not harness.calls
-    assert not (harness.root / 'runs').exists()
+    assert not (harness.root / 'data' / 'runs').exists()
 
 
 def test_zero_quota_skips_all_and_report_overwritten(harness):
-    (harness.root / '日报.md').write_text('旧日报')
+    (harness.root / 'reports' / '日报.md').write_text('旧日报')
     result = harness.execute(plan())
     assert not harness.calls and result['exit_code'] == 0
     assert all('quota=0，跳过' in row['note'] for row in result['platforms'])
-    assert '旧日报' not in (harness.root / '日报.md').read_text()
+    assert '旧日报' not in (harness.root / 'reports' / '日报.md').read_text()
 
 
 def test_live_quota_decrements_new_unique_applied(harness):
     data = plan()
     data['platforms']['boss'].update(quota=5, keywords=['AI产品', '产品实习', 'AI产品'])
-    write_json(harness.root / 'boss-深圳-log.json', {'applied': [entry('old')]})
+    write_json(harness.root / 'data' / 'logs' / 'boss-深圳-log.json', {'applied': [entry('old')]})
     harness.actions.extend([
         {'add': {'applied': [entry('old'), entry('a'), entry('a'), entry('b'), entry('c')]}},
         {'add': {'applied': [entry('d'), entry('e')]}}])
@@ -287,7 +292,7 @@ def test_timeout_preserves_partial_log_and_continues(harness, monkeypatch):
     def run(command, **kwargs):
         if command[1] == 'boss_apply.py':
             harness.calls.append(command)
-            write_json(harness.root / 'boss-深圳-log.json', {'pending': [entry('uncertain')]})
+            write_json(harness.root / 'data' / 'logs' / 'boss-深圳-log.json', {'pending': [entry('uncertain')]})
             raise subprocess.TimeoutExpired(command, daily.TIMEOUT)
         return original(command, **kwargs)
     monkeypatch.setattr(daily.subprocess, 'run', run)
@@ -295,7 +300,7 @@ def test_timeout_preserves_partial_log_and_continues(harness, monkeypatch):
     assert result['platforms'][0]['pending'] == 1
     assert result['platforms'][0]['status'] == '异常'
     assert len(harness.calls) == 2
-    assert '90 分钟' in next((harness.root / 'runs').rglob('boss-1.log')).read_text()
+    assert '90 分钟' in next((harness.root / 'data' / 'runs').rglob('boss-1.log')).read_text()
 
 
 @pytest.mark.parametrize('when', ['before', 'after'])
@@ -304,7 +309,7 @@ def test_bad_log_stops_only_platform(harness, when):
     data['platforms']['boss']['quota'] = 3
     data['platforms']['liepin'].update(quota=1, keywords=['AI产品'])
     if when == 'before':
-        (harness.root / 'boss-深圳-log.json').write_text('{')
+        (harness.root / 'data' / 'logs' / 'boss-深圳-log.json').write_text('{')
     else:
         harness.actions.append({'corrupt': True})
     result = harness.execute(data)
@@ -329,7 +334,7 @@ def test_post_steps_review_increment_inbox_header(harness, live):
     data = plan(greet=True, review_list=True, inbox=True)
     old_row = '| [x] | boss | A | 产品 | 1 | 2 | 复核 | 原因 | url | old |\n'
     new_row = '| [ ] | liepin | B | 产品 | 1 | 2 | 复核 | 原因 | url | new |\n'
-    (harness.root / '复核清单.md').write_text(old_row)
+    (harness.root / 'reports' / '复核清单.md').write_text(old_row)
     if live:
         harness.actions.append({})
     harness.actions.extend([
@@ -342,13 +347,13 @@ def test_post_steps_review_increment_inbox_header(harness, live):
         assert harness.calls[0][2:] == ['--city', '深圳', '--send', '--count', '10']
     assert result['review_added'] == 1 and result['hr_replied'] == 4
     assert '本次读取' in result['inbox_note']
-    md = (harness.root / '日报.md').read_text()
+    md = (harness.root / 'reports' / '日报.md').read_text()
     assert '复核清单新增：1' in md and 'HR 已回复：4' in md
 
 
 def test_failed_inbox_reports_old_file_as_stale(harness):
     data = plan(inbox=True)
-    (harness.root / '回复日报.md').write_text('# 回复日报\nBoss：会话 3｜HR 已回复 2')
+    (harness.root / 'reports' / '回复日报.md').write_text('# 回复日报\nBoss：会话 3｜HR 已回复 2')
     harness.actions.append({'code': 1, 'output': '风控冷却中，日报未更新'})
     result = harness.execute(data)
     assert result['hr_replied'] == 2 and '非本次更新' in result['inbox_note']
@@ -364,12 +369,12 @@ def test_post_inbox_wind_control_changes_overall_exit(harness):
 
 def test_unreadable_optional_reports_do_not_lose_daily(harness):
     data = plan(review_list=True, inbox=True)
-    (harness.root / '复核清单.md').write_bytes(b'\xff')
-    (harness.root / '回复日报.md').write_bytes(b'\xff')
+    (harness.root / 'reports' / '复核清单.md').write_bytes(b'\xff')
+    (harness.root / 'reports' / '回复日报.md').write_bytes(b'\xff')
     result = harness.execute(data)
     assert result['review_added'] == '未能核算'
     assert result['hr_replied'] is None
-    md = (harness.root / '日报.md').read_text()
+    md = (harness.root / 'reports' / '日报.md').read_text()
     assert '新复核清单不可读' in md and '回复日报不可读' in md
     assert 'HR 已回复：未读取' in md
 
@@ -398,7 +403,7 @@ def test_diff_bucket_transition_counts_new_applied():
 
 def test_render_all_sections_duration_rows_and_escaping():
     row = {'platform': 'boss', 'quota': 5, 'status': '风控',
-           'logs': ['runs/2026-10-14/boss-1.log'], 'note': '风控，停止',
+           'logs': ['data/runs/2026-10-14/boss-1.log'], 'note': '风控，停止',
            **daily.diff_logs({}, {'applied': [entry('a', company='公司|A\n<img>')],
                                   'pending': [entry('b')], 'review': [entry('c')]})}
     result = {'platforms': [row], 'elapsed_seconds': 3661, 'review_added': 1,
@@ -408,7 +413,7 @@ def test_render_all_sections_duration_rows_and_escaping():
     assert '# 日报 2026-10-14｜真投｜总耗时 1小时1分1秒' in md
     assert all(f'## {heading}' in md for heading in ('平台', '需要你处理', '本次新增已投', '运行说明'))
     assert '| boss | 5 | 1 | 1 | 1 | 0 | 风控 |' in md
-    assert 'runs/2026-10-14/boss-1.log' in md
+    assert '](../data/runs/2026-10-14/boss-1.log)' in md
     assert '待核验：1' in md and '复核清单新增：1' in md and '--approved' in md
     assert 'HR 已回复：3' in md and '回复日报.md' in md
     assert '| boss | 公司&#124;A &lt;img&gt; | AI产品 | https://example.test/job/a |' in md
@@ -449,7 +454,7 @@ def test_tracker_post_step_order_and_report(harness, live):
     assert [command[1] for command in harness.calls] == ['review_list.py', 'inbox_report.py', 'apply_tracker.py']
     assert harness.calls[-1] == [sys.executable, 'apply_tracker.py']
     assert result['tracker'] == {'entries': 0, 'due': 0, 'note': '本次更新，详见 网申进度.md'}
-    assert '网申入口 0 个，7 天内截止 0 个' in (harness.root / '日报.md').read_text()
+    assert '网申入口 0 个，7 天内截止 0 个' in (harness.root / 'reports' / '日报.md').read_text()
 
 
 def test_tracker_reads_only_top_statistics_not_notes(harness):
@@ -459,7 +464,7 @@ def test_tracker_reads_only_top_statistics_not_notes(harness):
     harness.actions.append({'files': {'网申进度.md': md}})
     result = harness.execute(plan(tracker=True))
     assert result['tracker']['entries'] == 12 and result['tracker']['due'] == 3
-    assert '网申入口 12 个，7 天内截止 3 个' in (harness.root / '日报.md').read_text()
+    assert '网申入口 12 个，7 天内截止 3 个' in (harness.root / 'reports' / '日报.md').read_text()
 
 
 @pytest.mark.parametrize('enabled', [None, False])
@@ -467,24 +472,24 @@ def test_tracker_default_off(harness, enabled):
     data = plan() if enabled is None else plan(tracker=enabled)
     result = harness.execute(data)
     assert not harness.calls and 'tracker' not in result
-    assert '网申入口' not in (harness.root / '日报.md').read_text()
+    assert '网申入口' not in (harness.root / 'reports' / '日报.md').read_text()
 
 
 def test_tracker_failure_marks_existing_statistics_stale(harness):
-    (harness.root / '网申进度.md').write_text('统计：入口数 8｜未投 8\n即将截止（7 天内）：2 个\n')
+    (harness.root / 'reports' / '网申进度.md').write_text('统计：入口数 8｜未投 8\n即将截止（7 天内）：2 个\n')
     harness.actions.append({'code': 2})
     result = harness.execute(plan(tracker=True))
     assert result['tracker']['entries'] == 8 and '非本次更新' in result['tracker']['note']
-    md = (harness.root / '日报.md').read_text()
+    md = (harness.root / 'reports' / '日报.md').read_text()
     assert '网申入口 8 个，7 天内截止 2 个' in md and r'apply\_tracker：退出码 2' in md
 
 
 @pytest.mark.parametrize('content', [None, '没有统计', b'\xff'])
 def test_tracker_missing_or_unreadable_report_still_generates_daily(harness, content):
     if isinstance(content, bytes):
-        (harness.root / '网申进度.md').write_bytes(content)
+        (harness.root / 'reports' / '网申进度.md').write_bytes(content)
     elif content is not None:
-        (harness.root / '网申进度.md').write_text(content)
+        (harness.root / 'reports' / '网申进度.md').write_text(content)
     result = harness.execute(plan(tracker=True))
     assert result['tracker']['entries'] is None
-    assert '网申入口：未读取统计' in (harness.root / '日报.md').read_text()
+    assert '网申入口：未读取统计' in (harness.root / 'reports' / '日报.md').read_text()

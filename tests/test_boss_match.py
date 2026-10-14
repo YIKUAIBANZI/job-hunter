@@ -81,6 +81,8 @@ def card(job_id, **kwargs):
 
 @pytest.fixture
 def harness(monkeypatch, tmp_path):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'reports' / '队列').mkdir(parents=True, exist_ok=True)
     def setup(cards, responses=None, chat_statuses=None, title_responses=None, protect=False, **overrides):
         if not protect:  # 旧用例默认标题含“产品”，关掉保护以覆盖粗筛路径
             monkeypatch.setattr(boss, "title_protected", lambda title: False)
@@ -138,8 +140,8 @@ def harness(monkeypatch, tmp_path):
 
         return SimpleNamespace(run=run, calls=calls, chats=chats, page=page, sleeps=sleeps,
                                title_calls=title_calls,
-                               log=lambda: load_log(tmp_path / "boss-深圳-log.json"),
-                               queue=lambda: (tmp_path / "boss-深圳-队列.md").read_text())
+                               log=lambda: load_log(tmp_path / 'data' / 'logs' / "boss-深圳-log.json"),
+                               queue=lambda: (tmp_path / 'reports' / '队列' / "boss-深圳-队列.md").read_text())
     return setup
 
 
@@ -159,7 +161,8 @@ def test_jev_dry_run_decisions_and_keyword_comparison(harness):
 
 
 def test_pre_filters_run_before_jev(harness, tmp_path):
-    (tmp_path / "boss-old-log.json").write_text(json.dumps({"pending": [{"job_id": "old"}]}))
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'data' / 'logs' / "boss-old-log.json").write_text(json.dumps({"pending": [{"job_id": "old"}]}))
     h = harness([card(""), card("black", company="外包服务"), card("old"),
                  card("title", title="资深产品经理"), card("ok", jd="资深导师带教")],
                 company_blacklist=["外包"])
@@ -255,7 +258,7 @@ def test_blocked_exit_always_writes_queue(harness, tmp_path, where):
     assert "停止原因" in h.queue()
     assert len(h.chats) == (1 if where == "chat" else 0)
     assert h.sleeps == ([6] if where == "chat" else [])  # 风控后不休息、不加载下一岗位
-    cooldown = json.loads((tmp_path / "boss-cooldown.json").read_text())
+    cooldown = json.loads((tmp_path / 'data' / 'cooldown' / "boss-cooldown.json").read_text())
     remaining = datetime.fromisoformat(cooldown["until"]) - datetime.now().astimezone()
     assert timedelta(hours=1, minutes=59) < remaining <= timedelta(hours=2)
     assert cooldown["reason"] == h.log()["failed"][0]["reason"]
@@ -301,15 +304,15 @@ def test_boss_llm_default_city_and_isolated_cache(harness, monkeypatch, tmp_path
         monkeypatch.setattr(sys, 'argv', ['boss_apply.py', '--job', '产品经理', '--dry-run'])
         boss.main()
         assert 'city=101210100' in h.page.navigations[-1]
-        assert (tmp_path/'boss-杭州-队列.md').exists()
-        path = tmp_path/'llm-cache.json'
+        assert (tmp_path / 'reports' / '队列' / 'boss-杭州-队列.md').exists()
+        path = tmp_path / 'data' / 'cache' / 'llm-cache.json'
         raw = path.read_text()
-        assert 'llm:' in raw and not (tmp_path/'jev-cache.json').exists()
+        assert 'llm:' in raw and not (tmp_path / 'data' / 'cache' / 'jev-cache.json').exists()
         assert len(h.calls) == 1
         # CLI 覆盖配置；Jev 保持老文件与原始职位键。
         h.run('--dry-run', '--matcher', 'jev')
-        assert (tmp_path/'jev-cache.json').exists()
-        assert 'latest:a' in (tmp_path/'jev-cache.json').read_text()
+        assert (tmp_path / 'data' / 'cache' / 'jev-cache.json').exists()
+        assert 'latest:a' in (tmp_path / 'data' / 'cache' / 'jev-cache.json').read_text()
         assert len(h.calls) == 2
     finally:
         jev.configure({})
@@ -398,9 +401,10 @@ def test_latest_skip_review_does_not_reopen(harness, hard, bucket, dry_run):
 
 
 def test_expired_latest_reopens_and_refresh_forces_jev(harness, tmp_path):
+    (tmp_path / 'data' / 'cache').mkdir(parents=True, exist_ok=True)
     h = harness([card("a")], responses=[answers(hard=0.45)] * 2)
     h.run("--dry-run")
-    path = tmp_path / "jev-cache.json"
+    path = tmp_path / 'data' / 'cache' / "jev-cache.json"
     cache = json.loads(path.read_text())
     cache["latest:a"]["ts"] = (datetime.now().astimezone() - timedelta(days=8)).isoformat()
     path.write_text(json.dumps(cache))
@@ -463,12 +467,14 @@ def test_view_cap_applies_to_real_and_fill_queue(harness, flags):
 
 
 def test_cooldown_stops_before_browser_and_preserves_queue(harness, tmp_path, monkeypatch, capsys):
+    (tmp_path / 'data' / 'cooldown').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'reports' / '队列').mkdir(parents=True, exist_ok=True)
     h = harness([card("a")])
-    (tmp_path / "boss-cooldown.json").write_text(json.dumps({
+    (tmp_path / 'data' / 'cooldown' / "boss-cooldown.json").write_text(json.dumps({
         "until": (datetime.now().astimezone() + timedelta(hours=2)).isoformat(),
         "reason": "页面验证", "page_url": "https://www.zhipin.com/web/passport/zp/verify.html",
     }))
-    (tmp_path / "boss-深圳-队列.md").write_text("上次队列")
+    (tmp_path / 'reports' / '队列' / "boss-深圳-队列.md").write_text("上次队列")
     monkeypatch.setattr(boss, "connect_chrome", lambda: pytest.fail("冷却中不得连接浏览器"))
     with pytest.raises(SystemExit) as exc:
         h.run("--dry-run")
@@ -479,8 +485,9 @@ def test_cooldown_stops_before_browser_and_preserves_queue(harness, tmp_path, mo
 
 
 def test_cooldown_write_failure_still_stops_on_block(harness, tmp_path, capsys):
+    (tmp_path / 'data' / 'cooldown').mkdir(parents=True, exist_ok=True)
     h = harness([card("a", block_on_open=True), card("b")])
-    (tmp_path / "boss-cooldown.json").mkdir()  # 模拟无法写入冷却文件
+    (tmp_path / 'data' / 'cooldown' / "boss-cooldown.json").mkdir()  # 模拟无法写入冷却文件
     with pytest.raises(SystemExit) as exc:
         h.run()
     assert exc.value.code == 1
@@ -492,8 +499,9 @@ def test_cooldown_write_failure_still_stops_on_block(harness, tmp_path, capsys):
 
 @pytest.mark.parametrize("ignore", [False, True])
 def test_expired_or_ignored_cooldown_allows_browser(harness, tmp_path, ignore):
+    (tmp_path / 'data' / 'cooldown').mkdir(parents=True, exist_ok=True)
     h = harness([card("a")])
-    (tmp_path / "boss-cooldown.json").write_text(json.dumps({
+    (tmp_path / 'data' / 'cooldown' / "boss-cooldown.json").write_text(json.dumps({
         "until": (datetime.now().astimezone() + timedelta(hours=2 if ignore else -2)).isoformat(),
         "reason": "页面验证",
     }))
@@ -510,13 +518,15 @@ def test_product_title_bypasses_title_prefilter(harness):
 @pytest.fixture
 def approved_boss(monkeypatch, tmp_path):
     """详情页替身跑真实 start_chat，原生点击时读盘验证 pending 顺序。"""
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'reports').mkdir(parents=True, exist_ok=True)
     import socket
     from review_list import REVIEW_FILE, render_review_list
 
     events, rests, navigations, clicked = [], [], [], []
     state = dict(title='产品实习', text='立即沟通', data_url='/wapi/zpgeek/friend/add.json?x=1',
                  code=0, blocked='', redirect='', explode=False, stale=False)
-    log_file = tmp_path / 'boss-深圳-log.json'
+    log_file = tmp_path / 'data' / 'logs' / 'boss-深圳-log.json'
 
     def forbidden(*a, **kw):
         pytest.fail('批准模式禁止 Jev、搜索和真实浏览器/网络连接')
@@ -606,7 +616,7 @@ def approved_boss(monkeypatch, tmp_path):
         rows = [dict(platform='boss', job_id=i, job='产品实习', company=f'公司{i}',
                      url=f'https://www.zhipin.com/job_detail/{i}.html', **overrides) for i in ids]
         log_file.write_text(json.dumps({'review': rows}))
-        (tmp_path / REVIEW_FILE).write_text(render_review_list(rows, {f'boss:{i}' for i in approved}))
+        (tmp_path / 'reports' / REVIEW_FILE).write_text(render_review_list(rows, {f'boss:{i}' for i in approved}))
 
     def run(*flags):
         monkeypatch.setattr(sys, 'argv', ['boss_apply.py', '--approved', '--city', '深圳', *flags])
@@ -656,7 +666,8 @@ def test_approved_boss_continue_chat_skipped(approved_boss):
 
 
 def test_approved_boss_cooldown_never_connects(approved_boss, tmp_path):
-    (tmp_path / 'boss-cooldown.json').write_text(json.dumps({
+    (tmp_path / 'data' / 'cooldown').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'data' / 'cooldown' / 'boss-cooldown.json').write_text(json.dumps({
         'until': (datetime.now().astimezone() + timedelta(hours=1)).isoformat()}))
     with pytest.raises(SystemExit) as exc:
         approved_boss.run()
@@ -700,5 +711,5 @@ def test_approved_boss_blocked_stops_before_click(approved_boss, tmp_path):
     h.state['blocked'] = '验证码'
     with pytest.raises(SystemExit):
         h.run()
-    assert not h.clicked and (tmp_path / 'boss-cooldown.json').exists()
+    assert not h.clicked and (tmp_path / 'data' / 'cooldown' / 'boss-cooldown.json').exists()
     assert h.log()['failed'][-1]['status'] == 'blocked'

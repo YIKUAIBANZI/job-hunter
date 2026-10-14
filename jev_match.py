@@ -265,6 +265,7 @@ def _load_cache(cache_file: Path) -> dict:
 
 
 def _save_cache(cache: dict, cache_file: Path):
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
     temp = cache_file.with_suffix(".json.tmp")
     temp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(cache_file)

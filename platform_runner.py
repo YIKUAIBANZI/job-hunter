@@ -14,7 +14,8 @@ from apply_runtime import (CHAT_INTERVAL, SUCCESS_REST, SUCCESS_REST_EVERY,
 from platform_adapters import (AdapterError, PlatformAdapter, same_job, parse_job_id,
                                yjs_apply_state, YJS_FILTER_REASON)
 from review_list import approved_review_rows
-from shared import (connect_chrome, cooldown_remaining, dedup_key, is_blacklisted,
+from shared import (log_path, cooldown_path, cache_path, queue_path,
+                    connect_chrome, cooldown_remaining, dedup_key, is_blacklisted,
                     load_applied_index, load_config, load_log, record, save_log, score_jd)
 
 
@@ -92,9 +93,9 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
     # CLI 显式选项优先；直接调用 execute 的离线测试也使用本轮配置。
     jev.configure({**cfg, 'matcher': args.matcher})
     pacing = PLATFORM_PACING[platform]
-    log_file = root / f'{platform}-{args.city}-log.json'
-    queue_file = root / f'{platform}-{args.city}-队列.md'
-    cooldown_file = root / f'{platform}-cooldown.json'
+    log_file = log_path(root, platform, args.city)
+    queue_file = queue_path(root, platform, args.city)
+    cooldown_file = cooldown_path(root, platform)
     log = load_log(log_file)
     index = load_applied_index(root)
     rows, seen = [], set()
@@ -102,7 +103,7 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
     stop_reason = ''
     failures = 0
     key = resume = profile = ''
-    cache_file = root / f'{"llm" if args.matcher == "llm" else "jev"}-{platform}-cache.json'
+    cache_file = cache_path(root, f'{"llm" if args.matcher == "llm" else "jev"}-{platform}-cache.json')
     current = {'platform': platform}
 
     def persist(bucket, entry):
@@ -367,6 +368,7 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
         stats = {**counts, 'platform': platform, 'city': args.city, 'dry_run': args.dry_run,
                  'stop_reason': stop_reason,
                  **{name: sum(r.get('decision') == name for r in rows) for name in ('apply', 'review', 'skip')}}
+        queue_file.parent.mkdir(parents=True, exist_ok=True)
         queue_file.write_text(jev.render_queue_md(rows, stats), encoding='utf-8')
         print(f"{platform}：成功 {counts['applied']}，待核验 {counts['pending']}，详情 {counts['views']}，评估 {counts['evaluated']}")
         print(f'停止原因：{stop_reason or "本轮完成"}\n队列：{queue_file}')

@@ -6,7 +6,14 @@ origin: local
 
 # Job Hunter
 
-使用者是用户和用户自己的 agent。先读 `mmr.md` 恢复当前状态，命令与筛选细节查 [README.md](README.md)。已有简历、偏好和授权沿用，不重复询问。
+使用者是用户和用户自己的 agent。先读 `docs/mmr.md` 恢复当前状态，命令与筛选细节查 [README.md](README.md)。已有简历、偏好和授权沿用，不重复询问。
+
+## 目录规则
+
+1. 不在项目根目录新建运行时文件；新增输出必须经过 `shared.py` 的路径函数：人看的 Markdown 用 `report_path/queue_path` 写到 `reports/`，程序状态用 `log_path/cooldown_path/cache_path/state_path` 写到 `data/` 对应子目录。路径函数不创建目录；每个写函数在写入前创建父目录，原子写临时文件与目标同目录。
+2. 新增测试放 `tests/`，文档与交接放 `docs/`；入口与模块保持根目录平铺。
+3. 个人文件（`config.json`、`daily.json`、简历、`chrome-debug/`、`data/`、`reports/`）一律不提交。
+4. 从旧版平铺布局升级：首次运行前由维护者按 [README 的迁移命令](README.md#从旧布局迁移) 把旧文件移入新目录；不要直接运行后把旧日志遗漏当作没有投递历史。
 
 ## 首次使用
 
@@ -67,10 +74,10 @@ python3 config_tool.py check
 
 ## 复核、日跑与交付
 
-`python3 review_list.py [--city 深圳]` 生成 `复核清单.md`。用户看过并勾选 `[x]` 后，BOSS/猎聘/应届生/鱼泡可用 `--approved --city 深圳 --count 1`；不搜索、不读简历/模型密钥、不调模型，仍核验详情身份、公司、冷却、去重与按钮，未校准平台仍须首单门禁。禁止 `--fill-queue`，BOSS 也禁止 `--fast/--ignore-cooldown`。
+`python3 review_list.py [--city 深圳]` 生成 `reports/复核清单.md`。用户看过并勾选 `[x]` 后，BOSS/猎聘/应届生/鱼泡可用 `--approved --city 深圳 --count 1`；不搜索、不读简历/模型密钥、不调模型，仍核验详情身份、公司、冷却、去重与按钮，未校准平台仍须首单门禁。禁止 `--fill-queue`，BOSS 也禁止 `--fast/--ignore-cooldown`。
 
-日跑 `python3 daily.py [--plan daily.json]` 默认 dry-run；只有对应平台与配额已授权才 `--live`。计划关键词必须精确属于 `target_roles`，不扩词；五平台配额与城市由 daily.json 决定，不能误用 default_count。顺序运行、不轮询；读取退出码、`日报.md` 与 `runs/<日期>/` 日志，0 不代表配额全部完成。pending 停该平台，超时/风控不重试。
+日跑 `python3 daily.py [--plan daily.json]` 默认 dry-run；只有对应平台与配额已授权才 `--live`。计划关键词必须精确属于 `target_roles`，不扩词；五平台配额与城市由 daily.json 决定，不能误用 default_count。顺序运行、不轮询；读取退出码、`reports/日报.md` 与 `data/runs/<日期>/` 日志，0 不代表配额全部完成。pending 停该平台，超时/风控不重试。
 
 招呼语补发 `boss_greet.py` 默认预览，单独获发送授权才 `--send`。`inbox_report.py` 只读回复，不点击会话/标已读、不发消息；`apply_tracker.py` 只读本地官网缓存，网申由用户手动完成。官网入口发现仍是独立 Jev+搜索流程，不受 JD matcher 配置影响。
 
-每轮交付本次新增 applied、pending、复核/跳过、停止原因与证据边界，查看 `<平台>-<城市>-队列.md` 和日志。applied 不证明简历附件已送达、HR 回复或面试；mock 测试不能写成实投。个人配置、简历、模型缓存、日志、密钥和认证目录只留本地，禁止提交；LLM 缓存文件尚未列入当前 .gitignore，尤其注意 `llm-cache.json` 与 `llm-<平台>-cache.json`。
+每轮交付本次新增 applied、pending、复核/跳过、停止原因与证据边界，查看 `reports/队列/<平台>-<城市>-队列.md` 和日志。applied 不证明简历附件已送达、HR 回复或面试；mock 测试不能写成实投。个人配置、简历、模型缓存、日志、密钥和认证目录只留本地，禁止提交；新目录及旧根目录 LLM 缓存均已加入 `.gitignore`。

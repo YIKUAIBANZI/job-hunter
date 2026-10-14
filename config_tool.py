@@ -191,6 +191,7 @@ def check_config(cfg, root, *, probe_chrome):
 
 def atomic_write(path, cfg):
     """同目录临时文件 + replace，写失败不留下半份配置。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
     temp = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,

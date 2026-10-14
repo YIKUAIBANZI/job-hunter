@@ -50,8 +50,9 @@ def test_same_title_different_id_rejected():
 
 
 def test_log_namespace_and_legacy_ids(tmp_path):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
     for platform in ('51job','liepin','yupao','boss'):
-        (tmp_path/f'{platform}-old-log.json').write_text(json.dumps({'pending':[{'jobId':'123','company':'A','job':'B'}]}))
+        (tmp_path / 'data' / 'logs' / f'{platform}-old-log.json').write_text(json.dumps({'pending':[{'jobId':'123','company':'A','job':'B'}]}))
     index=load_applied_index(tmp_path)
     assert {f'{p}:123' for p in ('51job','liepin','yupao','boss')} <= index
     assert 'a||b' in index
@@ -181,7 +182,7 @@ def test_dry_run_main_zero_submits_and_count(tmp_path,monkeypatch):
     monkeypatch.setattr(runner,'submit',lambda *a,**k:pytest.fail('dry-run submitted'))
     adapter=FakeAdapter();stats=run(tmp_path,adapter)
     assert stats['evaluated']==2 and adapter.opened==['1','2']
-    log=load_log(tmp_path/'liepin-深圳-log.json')
+    log=load_log(tmp_path / 'data' / 'logs' / 'liepin-深圳-log.json')
     assert not log['applied'] and not log['pending']
 
 
@@ -205,16 +206,16 @@ def test_count_stops_after_success(tmp_path,monkeypatch):
     monkeypatch.setattr(runner,'submit',applied)
     adapter=FakeAdapter();stats=run(tmp_path,adapter,args())
     assert stats['applied']==2 and adapter.opened==['1','2']
-    assert not load_log(tmp_path/'liepin-深圳-log.json')['pending']
+    assert not load_log(tmp_path / 'data' / 'logs' / 'liepin-深圳-log.json')['pending']
 
 
 def test_block_writes_cooldown_before_next_run(tmp_path):
     stats=run(tmp_path,FakeAdapter(block=True))
     assert '验证' in stats['stop_reason']
-    assert (tmp_path/'liepin-cooldown.json').exists()
+    assert (tmp_path / 'data' / 'cooldown' / 'liepin-cooldown.json').exists()
     adapter=FakeAdapter();run(tmp_path,adapter)
     assert adapter.searches==0
-    assert load_log(tmp_path/'liepin-深圳-log.json')['failed'][0]['status']=='blocked'
+    assert load_log(tmp_path / 'data' / 'logs' / 'liepin-深圳-log.json')['failed'][0]['status']=='blocked'
 
 
 def test_max_views(tmp_path):
@@ -301,6 +302,7 @@ def test_llm_missing_configuration_exits_without_browser(tmp_path, monkeypatch, 
 
 
 def test_llm_runner_reuses_review_gate_cache_and_three_failure_stop(tmp_path, monkeypatch):
+    (tmp_path / 'data' / 'cache').mkdir(parents=True, exist_ok=True)
     from test_llm_match import full_answers, response
     cfg = config(tmp_path)
     cfg.update(resume_path='resume.txt', resume_redact=['张三'])
@@ -318,7 +320,7 @@ def test_llm_runner_reuses_review_gate_cache_and_three_failure_stop(tmp_path, mo
     try:
         stats = runner.execute('liepin', args('--dry-run', '--matcher', 'llm'), cfg, FakeAdapter(), tmp_path, rest=lambda *a: None)
         assert stats['review'] == 2 and not stats['applied'] and len(requests) == 2
-        assert (tmp_path/'llm-liepin-cache.json').exists() and not (tmp_path/'jev-liepin-cache.json').exists()
+        assert (tmp_path / 'data' / 'cache' / 'llm-liepin-cache.json').exists() and not (tmp_path / 'data' / 'cache' / 'jev-liepin-cache.json').exists()
         runner.execute('liepin', args('--dry-run', '--matcher', 'llm'), cfg, FakeAdapter(), tmp_path, rest=lambda *a: None)
         assert len(requests) == 2
         monkeypatch.setattr(runner.jev.request, 'urlopen', lambda *a, **kw: response('{}'))
@@ -385,7 +387,7 @@ def test_post_click_process_error_preserves_prewrite(tmp_path,monkeypatch):
     def crash(a,c,pre,**kw): pre();raise RuntimeError('crash')
     monkeypatch.setattr(runner,'submit',crash)
     run(tmp_path,FakeAdapter(),args())
-    log=load_log(tmp_path/'liepin-深圳-log.json')
+    log=load_log(tmp_path / 'data' / 'logs' / 'liepin-深圳-log.json')
     assert len(log['pending'])==1 and 'liepin:1' in load_applied_index(tmp_path)
 
 
@@ -661,6 +663,7 @@ def test_yjs_filters_rejected_before_connection(flag, capsys):
 @pytest.mark.parametrize('flag,reason', [('already_applied','平台显示已申请'),('external','转载或已过期岗位')])
 @pytest.mark.parametrize('dry_run', [False,True])
 def test_card_platform_state_skips_before_detail_and_jev(tmp_path,monkeypatch,platform,flag,reason,dry_run):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
     cfg=config(tmp_path);cfg['resume_path']='resume.txt';(tmp_path/'resume.txt').write_text('测试简历')
     monkeypatch.setattr(runner.jev,'load_jev_key',lambda:'test-key')
     for name in ('match_title','match_job','latest_match'):
@@ -670,7 +673,7 @@ def test_card_platform_state_skips_before_detail_and_jev(tmp_path,monkeypatch,pl
     parsed=runner.parse_args({'深圳':'040000'},['--job','产品经理',*(['--dry-run'] if dry_run else [])],platform=platform)
     stats=runner.execute(platform,parsed,cfg,adapter,tmp_path,rest=lambda *a:None)
     assert stats['skip']==1 and not adapter.opened
-    assert load_log(tmp_path/f'{platform}-深圳-log.json')['skipped'][0]['reason']==reason
+    assert load_log(tmp_path / 'data' / 'logs' / f'{platform}-深圳-log.json')['skipped'][0]['reason']==reason
 
 
 @pytest.mark.parametrize('state', [
@@ -681,6 +684,7 @@ def test_card_platform_state_skips_before_detail_and_jev(tmp_path,monkeypatch,pl
 ])
 @pytest.mark.parametrize('dry_run', [False,True])
 def test_yjs_runner_state_gate_precedes_all_jev(tmp_path,monkeypatch,state,dry_run):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
     cfg=config(tmp_path);cfg['resume_path']='resume.txt';(tmp_path/'resume.txt').write_text('测试简历')
     monkeypatch.setattr(runner.jev,'load_jev_key',lambda:'test-key')
     # 标题初筛在详情前（与其他平台一致）；状态不可投时不得调完整 Jev
@@ -698,7 +702,7 @@ def test_yjs_runner_state_gate_precedes_all_jev(tmp_path,monkeypatch,state,dry_r
     ok,name,reason=adapters.yjs_apply_state(state)
     assert not ok and stats[name]==1 and adapter.opened==['123']
     bucket='review' if name=='review' else 'skipped'
-    assert load_log(tmp_path/'yingjiesheng-深圳-log.json')[bucket][0]['reason']==reason
+    assert load_log(tmp_path / 'data' / 'logs' / 'yingjiesheng-深圳-log.json')[bucket][0]['reason']==reason
 
 
 @pytest.mark.parametrize('outer,nested,expected', [
@@ -800,7 +804,7 @@ def test_yjs_approved_state_gate_and_one_attempt(tmp_path,monkeypatch,no_jev_app
     submitted=[]
     def applied(a,c,pre,**kw):
         pre();submitted.append(c['job_id'])
-        assert load_log(tmp_path/'yingjiesheng-深圳-log.json')['pending'][-1]['job_id']==c['job_id']
+        assert load_log(tmp_path / 'data' / 'logs' / 'yingjiesheng-深圳-log.json')['pending'][-1]['job_id']==c['job_id']
         return 'applied','接口确认',{'attempted':True}
     monkeypatch.setattr(runner,'submit',applied)
     parsed=runner.parse_args({'深圳':'040000'},['--approved','--calibrate','--job-id','2','--count','1'],platform='yingjiesheng')
@@ -808,7 +812,7 @@ def test_yjs_approved_state_gate_and_one_attempt(tmp_path,monkeypatch,no_jev_app
     assert adapter.opened==['2'] and stats[expected]==1
     if expected=='applied':
         assert submitted==['2'] and '已尝试一次' in stats['stop_reason']
-        assert load_log(tmp_path/'yingjiesheng-深圳-log.json')['applied'][0]['reason'].startswith('[人工批准]')
+        assert load_log(tmp_path / 'data' / 'logs' / 'yingjiesheng-深圳-log.json')['applied'][0]['reason'].startswith('[人工批准]')
     else:
         assert submitted==[] and stats['pending']==0
 
@@ -1191,6 +1195,7 @@ def test_51job_cards_join_api_by_id_and_title(state,applied,external,reason):
 @pytest.mark.parametrize('items', [{}, {'456':job51_item()}, {'123':{**job51_item(),'jobName':'销售'}},
     {'123':{**job51_item(),'jobDescribe':''}}, {'123':{**job51_item(),'jobDescribe':None}}])
 def test_51job_unmatched_cards_review_without_jev(tmp_path,monkeypatch,items):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
     tab=Job51Tab([],cards=[job51_card()]);adapter=job51_adapter(tab);adapter.job51_items=items
     adapter.search=lambda:None;adapter.check=lambda:('','');adapter.next_page=lambda n:False
     assert adapter.cards()[0]['jd']==''
@@ -1202,7 +1207,7 @@ def test_51job_unmatched_cards_review_without_jev(tmp_path,monkeypatch,items):
     parsed=runner.parse_args({'深圳':'123'},['--job','产品经理','--dry-run'],platform='51job')
     stats=runner.execute('51job',parsed,cfg,adapter,tmp_path,rest=lambda *a:None)
     assert stats['review']==1 and not stats['applied']
-    assert load_log(tmp_path/'51job-深圳-log.json')['review'][0]['reason']=='卡片与详情 ID/标题不匹配，或 JD 为空'
+    assert load_log(tmp_path / 'data' / 'logs' / '51job-深圳-log.json')['review'][0]['reason']=='卡片与详情 ID/标题不匹配，或 JD 为空'
 
 
 @pytest.mark.parametrize('label,disabled,ready', [('投递',None,True),('已投递',None,False),('投递','',False)])
@@ -1227,6 +1232,7 @@ def test_51job_open_detail_uses_list_button_without_click(label,disabled,ready):
 
 @pytest.mark.parametrize('dry_run', [False,True])
 def test_51job_external_reason_skips_before_jev(tmp_path,monkeypatch,dry_run):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
     cfg=config(tmp_path);cfg['resume_path']='resume.txt';(tmp_path/'resume.txt').write_text('测试简历')
     monkeypatch.setattr(runner.jev,'load_jev_key',lambda:'test-key')
     for name in ('match_title','match_job','latest_match'):
@@ -1236,17 +1242,19 @@ def test_51job_external_reason_skips_before_jev(tmp_path,monkeypatch,dry_run):
     parsed=runner.parse_args({'深圳':'123'},['--job','产品经理',*(['--dry-run'] if dry_run else [])],platform='51job')
     stats=runner.execute('51job',parsed,cfg,adapter,tmp_path,rest=lambda *a:None)
     assert stats['skip']==1 and not adapter.opened
-    assert load_log(tmp_path/'51job-深圳-log.json')['skipped'][0]['reason']==reason
+    assert load_log(tmp_path / 'data' / 'logs' / '51job-深圳-log.json')['skipped'][0]['reason']==reason
 
 
 def seed_approved(tmp_path, platform='liepin', approved=('1', '2'), ids=('1', '2', '3')):
+    (tmp_path / 'data' / 'logs').mkdir(parents=True, exist_ok=True)
+    (tmp_path / 'reports').mkdir(parents=True, exist_ok=True)
     from review_list import REVIEW_FILE, render_review_list
     rows = [dict(platform=platform, job_id=i, job='产品实习', company=f'公司{i}',
                  url=(f'https://www.liepin.com/job/{i}.shtml' if platform == 'liepin'
                       else f'https://q.yingjiesheng.com/jobdetail/{i}.html' if platform == 'yingjiesheng'
                       else f'https://www.yupao.com/zhaogong/{i}.html')) for i in ids]
-    (tmp_path / f'{platform}-深圳-log.json').write_text(json.dumps({'review': rows}))
-    (tmp_path / REVIEW_FILE).write_text(render_review_list(rows, {f'{platform}:{i}' for i in approved}))
+    (tmp_path / 'data' / 'logs' / f'{platform}-深圳-log.json').write_text(json.dumps({'review': rows}))
+    (tmp_path / 'reports' / REVIEW_FILE).write_text(render_review_list(rows, {f'{platform}:{i}' for i in approved}))
 
 
 class ApprovedAdapter(FakeAdapter):
@@ -1272,7 +1280,7 @@ def test_liepin_approved_only_checked_count_pending_order_and_dedup(tmp_path, mo
 
     def applied(adapter, card, pre, **kw):
         pre()
-        pending = load_log(tmp_path / 'liepin-深圳-log.json')['pending']
+        pending = load_log(tmp_path / 'data' / 'logs' / 'liepin-深圳-log.json')['pending']
         assert pending[-1]['job_id'] == card['job_id']
         submitted.append(card['job_id'])
         return 'applied', '当前岗位按钮确认成功', {'attempted': True}
@@ -1284,7 +1292,7 @@ def test_liepin_approved_only_checked_count_pending_order_and_dedup(tmp_path, mo
     assert stats['applied'] == 1 and adapter.opened == ['1']
     run(tmp_path, ApprovedAdapter(), args('--approved', '--matcher', 'jev'))
     assert submitted == ['1', '2']
-    log = load_log(tmp_path / 'liepin-深圳-log.json')
+    log = load_log(tmp_path / 'data' / 'logs' / 'liepin-深圳-log.json')
     assert not log['pending'] and len(log['applied']) == 2
     assert all(r['reason'].startswith('[人工批准]') for r in log['applied'])
     adapter = ApprovedAdapter()
@@ -1297,7 +1305,7 @@ def test_approved_platform_identity_mismatch_no_submit(tmp_path, monkeypatch, no
     monkeypatch.setattr(runner, 'submit', lambda *a, **kw: pytest.fail('身份不符不得提交'))
     stats = run(tmp_path, ApprovedAdapter(bad_detail=True), args('--approved'))
     assert stats['review'] == 2 and not stats['applied']
-    assert not load_log(tmp_path / 'liepin-深圳-log.json')['pending']
+    assert not load_log(tmp_path / 'data' / 'logs' / 'liepin-深圳-log.json')['pending']
 
 
 def test_approved_platform_pending_stops_and_preserves_dedup(tmp_path, monkeypatch, no_jev_approved):
@@ -1315,9 +1323,10 @@ def test_approved_platform_pending_stops_and_preserves_dedup(tmp_path, monkeypat
 
 
 def test_approved_platform_cooldown_no_connection(tmp_path, no_jev_approved):
+    (tmp_path / 'data' / 'cooldown').mkdir(parents=True, exist_ok=True)
     from datetime import datetime, timedelta
     seed_approved(tmp_path)
-    (tmp_path / 'liepin-cooldown.json').write_text(json.dumps({
+    (tmp_path / 'data' / 'cooldown' / 'liepin-cooldown.json').write_text(json.dumps({
         'until': (datetime.now().astimezone() + timedelta(hours=1)).isoformat()}))
     adapter = ApprovedAdapter()
     stats = run(tmp_path, adapter, args('--approved'))
