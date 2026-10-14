@@ -17,9 +17,9 @@ _DEFAULT_PACING = {'view_interval': VIEW_INTERVAL, 'view_rest_every': VIEW_REST_
 PLATFORM_PACING = {
     'liepin': dict(_DEFAULT_PACING),
     'yupao': dict(_DEFAULT_PACING),
-    # 51job 详情风控更敏感，默认降低浏览上限并延长休息。
-    '51job': {**_DEFAULT_PACING, 'view_interval': (15, 30), 'view_rest_every': 5,
-              'view_rest': (90, 180), 'max_views': 20},
+    # 51job 只评估列表接口 JD，不打开详情页；保留评估间隔与休息。
+    '51job': {**_DEFAULT_PACING, 'view_interval': (6, 12), 'view_rest_every': 8,
+              'view_rest': (60, 120), 'max_views': 30},
     'yingjiesheng': {**_DEFAULT_PACING, 'view_interval': (15, 30), 'view_rest_every': 5,
                     'view_rest': (90, 180), 'max_views': 20},
 }

@@ -156,6 +156,7 @@ class PlatformAdapter:
         self.detail_tab = None
         self.owned_details = {}
         self.current = None
+        self.job51_items = {}
         self.yjs_items = []
         self.yjs_state = None
         self.button_reason = ''
@@ -183,6 +184,41 @@ class PlatformAdapter:
                 if self.search_tab is None:
                     self.search_tab = self.browser.new_tab()
             self._yjs_search_packet(lambda: self.search_tab.get(url))
+            return
+        if self.platform == '51job':
+            if self.search_tab is None:
+                p = urlsplit(url)
+                self.search_tab = pick_tab(self.browser.get_tabs(), p.hostname, p.path)
+                if self.search_tab is None:
+                    self.search_tab = self.browser.new_tab()
+            self.job51_items = {}
+            self.search_tab.listen.start('we.51job.com/api/job/search-pc')
+            try:
+                self.search_tab.get(url)
+                time.sleep(5)
+                self.apply_filters()
+                # 筛选会重新请求；等到连续 3 秒无包，仅采用最后一包。
+                deadline = time.monotonic() + 20
+                last_packet = None
+                while time.monotonic() < deadline:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    packet = self.search_tab.listen.wait(timeout=min(3, remaining), raise_err=False)
+                    if not packet:
+                        break
+                    last_packet = packet
+                try:
+                    items = _packet_body(last_packet)['resultbody']['job']['items']
+                    if not isinstance(items, list) or any(
+                            not isinstance(item, dict) or not isinstance(item.get('jobId'), str)
+                            or not item['jobId'] for item in items):
+                        raise ValueError
+                except (KeyError, TypeError, ValueError, AttributeError):
+                    raise AdapterError('51job 搜索接口未返回岗位数据') from None
+                self.job51_items = {item['jobId']: item for item in items}
+            finally:
+                self.search_tab.listen.stop()
             return
         if self.search_tab is None:
             p = urlsplit(url)
@@ -298,6 +334,16 @@ class PlatformAdapter:
             c['job_id'] = c.get('job_id') or parse_job_id(self.platform, c.get('href'))
             # 51job 卡片没有职位 href，不能把公司链接当职位链接。
             c['url'] = safe_url(c.get('href', ''))
+            if self.platform == '51job':
+                c['jd'] = ''
+                item = self.job51_items.get(c['job_id'])
+                if item and (item.get('jobName') or '').strip() == c['title']:
+                    c.update(jd=item.get('jobDescribe') or '', already_applied=item.get('isApply') is True,
+                             url=safe_url(item.get('jobHref')),
+                             external=item.get('isFromXyx') is True or item.get('isReprintJob') == '1'
+                             or item.get('isJump') == '1' or str(item.get('isExpire')).lower() in ('1', 'true'),
+                             external_reason='校招岗位（应届生网），请用 yingjiesheng_apply.py 投递'
+                             if item.get('isFromXyx') is True else '转载/外跳/过期岗位')
         return cards
 
     def locate_card(self, card):
@@ -317,6 +363,13 @@ class PlatformAdapter:
            'a[data-nick="job-detail-job-info"]' if self.platform == 'liepin' else 'main [data-index] a[href*="/zhaogong/"]')
 
     def open_detail(self, card):
+        if self.platform == '51job':
+            self.current = card
+            if not self.locate_card(card):
+                return {}
+            return {**{k: card.get(k, '') for k in ('job_id', 'title', 'jd', 'company', 'url')},
+                    'button_state': self.button_state(card),
+                    'button_ready': self.verified_button(card) is not None}
         if self.platform == 'yingjiesheng':
             return self.open_approved_detail({**card, 'url': f"https://q.yingjiesheng.com/jobdetail/{card['job_id']}.html"})
         self.close_detail()
@@ -327,8 +380,6 @@ class PlatformAdapter:
         if self.platform == 'yupao':
             # 点击卡片容器切换右侧详情；点击标题链接会另开页面。
             element = element.run_js('return this.closest("[data-index]");')
-        elif self.platform == '51job':
-            element = element.ele('css:.jname', timeout=1)
         before = set(self.browser.tab_ids)
         try:
             element.click(by_js=False)
@@ -411,6 +462,8 @@ class PlatformAdapter:
 
     def detail_snapshot(self):
         approved = getattr(self.args, 'approved', False)
+        if self.platform == '51job' and not approved and self.detail_tab is None:
+            return {k: (self.current or {}).get(k, '') for k in ('job_id', 'title', 'jd', 'company', 'url')}
         tab = self.action_tab if approved else self.search_tab if self.platform == 'yupao' else self.detail_tab
         if tab is None:
             return {}

@@ -34,7 +34,7 @@ def parse_args(city_codes, argv=None, *, platform='liepin', default_count=20, de
     p.add_argument('--match-policy', choices=('review-gate', 'boss-b'), default='review-gate',
                    help='默认 Jev 建议复核不自动投；boss-b 保留交接方案 B')
     p.add_argument('--max-views', type=int, default=PLATFORM_PACING[platform]['max_views'],
-                   help='最多读取详情数；51job/应届生默认 20，其他平台默认 60')
+                   help='最多读取详情数（51job 为列表 JD 评估数）；51job 默认 30，应届生默认 20，其他平台默认 60')
     p.add_argument('--max-pages', type=int, default=5)
     p.add_argument('--job-type', default='', help='平台工作类型选项，51job 支持；默认不限')
     p.add_argument('--experience', default='', help='平台经验选项：猎聘 实习生/应届生；51job 在校生/应届生')
@@ -192,7 +192,11 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                     decision(entry, 'skip', '平台显示已申请')
                     continue
                 if card.get('external'):
-                    decision(entry, 'skip', '转载或已过期岗位')
+                    decision(entry, 'skip', card.get('external_reason') or '转载或已过期岗位')
+                    continue
+                # 51job 接口与卡片关联失败时，先复核，不调用 Jev 标题粗筛或缓存。
+                if platform == '51job' and not card.get('jd'):
+                    decision(entry, 'review', '卡片与详情 ID/标题不匹配，或 JD 为空')
                     continue
                 cache_id = scope + ':' + card['job_id']
                 try:

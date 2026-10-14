@@ -780,7 +780,7 @@ def test_yjs_dialog_overrides_received_success_evidence(checks,monkeypatch):
     assert events.count('click')==1 and events[-1]=='stop'
 
 
-def test_yjs_runner_uses_51job_view_pacing(tmp_path):
+def test_yjs_runner_keeps_original_view_pacing(tmp_path):
     cards=[dict(job_id=str(i),title='产品经理',company=f'公司{i}') for i in range(1,6)]
     adapter=FakeAdapter(cards);original=adapter.open_detail
     adapter.open_detail=lambda c:{**original(c),'yjs_state':{'jobid':c['job_id'],'isapply':'0'}}
@@ -788,7 +788,7 @@ def test_yjs_runner_uses_51job_view_pacing(tmp_path):
     rests=[]
     stats=runner.execute('yingjiesheng',parsed,config(tmp_path),adapter,tmp_path,rest=lambda interval,check:rests.append(interval))
     assert stats['views']==5 and rests==[(15,30)]*5+[(90,180)]
-    assert rt.PLATFORM_PACING['yingjiesheng']==rt.PLATFORM_PACING['51job']
+    assert rt.PLATFORM_PACING['yingjiesheng']['max_views']==20
 
 
 @pytest.mark.parametrize('platform,urls', [
@@ -931,7 +931,7 @@ def test_51job_experience_alias_native_selection(monkeypatch,experience,expected
     assert events==['open','selected']
 
 
-@pytest.mark.parametrize('platform,default', [('51job',20),('yingjiesheng',20),('liepin',60),('yupao',60)])
+@pytest.mark.parametrize('platform,default', [('51job',30),('yingjiesheng',20),('liepin',60),('yupao',60)])
 def test_platform_max_views_default_and_override(platform,default):
     parsed=runner.parse_args({'深圳':'123'},['--job','产品'],platform=platform)
     assert parsed.max_views==default==rt.PLATFORM_PACING[platform]['max_views']
@@ -940,7 +940,7 @@ def test_platform_max_views_default_and_override(platform,default):
         assert parsed.max_views==explicit
 
 
-@pytest.mark.parametrize('platform,limit', [('51job',20),('yingjiesheng',20),('liepin',60),('yupao',60)])
+@pytest.mark.parametrize('platform,limit', [('51job',30),('yingjiesheng',20),('liepin',60),('yupao',60)])
 def test_main_passes_platform_to_parser(monkeypatch,platform,limit):
     monkeypatch.setattr(runner,'load_config',lambda:{'default_count':2,'min_score':60})
     def execute(p,a,cfg,adapter,root):
@@ -952,11 +952,11 @@ def test_main_passes_platform_to_parser(monkeypatch,platform,limit):
 
 
 @pytest.mark.parametrize('platform,interval,every,extra', [
-    ('51job',(15,30),5,(90,180)),('liepin',(6,15),10,(45,90)),
+    ('51job',(6,12),8,(60,120)),('liepin',(6,15),10,(45,90)),
     ('yupao',(6,15),10,(45,90)),
 ])
 def test_runner_uses_platform_view_pacing(tmp_path,platform,interval,every,extra):
-    cards=[dict(job_id=str(i),title='产品实习',company=f'公司{i}',salary='',url='')
+    cards=[dict(job_id=str(i),title='产品实习',company=f'公司{i}',salary='',url='',jd='产品 实习 AI')
            for i in range(1,2*every+1)]
     parsed=runner.parse_args({'深圳':'123'},['--job','产品','--count',str(len(cards)),
                                           '--dry-run','--matcher','keyword'],platform=platform)
@@ -969,16 +969,189 @@ def test_runner_uses_platform_view_pacing(tmp_path,platform,interval,every,extra
     assert rests==([interval]*every+[extra])*2
 
 
-@pytest.mark.parametrize('explicit,expected', [(None,20),(3,3),(25,25)])
+@pytest.mark.parametrize('explicit,expected', [(None,30),(3,3),(25,25)])
 def test_51job_runner_respects_view_limit(tmp_path,explicit,expected):
-    cards=[dict(job_id=str(i),title='产品实习',company=f'公司{i}',salary='',url='') for i in range(1,31)]
+    cards=[dict(job_id=str(i),title='产品实习',company=f'公司{i}',salary='',url='',jd='产品 实习 AI') for i in range(1,32)]
     flags=[] if explicit is None else ['--max-views',str(explicit)]
-    parsed=runner.parse_args({'深圳':'123'},['--job','产品','--count','30',
+    parsed=runner.parse_args({'深圳':'123'},['--job','产品','--count','31',
                                           '--dry-run','--matcher','keyword',*flags],platform='51job')
     adapter=FakeAdapter(cards)
     stats=runner.execute('51job',parsed,config(tmp_path),adapter,tmp_path,rest=lambda *a:None)
     assert stats['views']==len(adapter.opened)==expected
     assert stats['stop_reason']=='已达 --max-views 上限'
+
+
+class Job51Tab:
+    def __init__(self, events, packets=(), cards=()):
+        self.events, self.items = events, list(cards)
+        self.url = build_search_url('51job', '产品经理', '123')
+        self.listen = YjsListener(events, packets)
+        self.label, self.disabled = '投递', None
+        self.button = SimpleNamespace(text=self.label, attr=lambda name:self.disabled if name=='disabled' else None,
+                                      click=lambda **kw:pytest.fail('读取列表 JD 不得点击'))
+        self.element = SimpleNamespace(ele=lambda selector, **kw:self.button,
+                                       click=lambda **kw:pytest.fail('不得打开详情'))
+
+    def get(self, url):
+        self.events.append(('get', url))
+        self.url = url
+
+    def run_js(self, script, *args):
+        if script == adapters.JOB51_CARDS:
+            return [dict(c) for c in self.items]
+        assert 'd.jobId' in script and 'd.jobTitle.trim()' in script
+        return self.element if any((c['job_id'], c['title'].strip()) == args for c in self.items) else None
+
+
+def job51_item():
+    return dict(jobId='123', jobName='产品经理', jobDescribe='产品需求 AI 实习',
+                jobHref='https://jobs.51job.com/shenzhen/123.html?token=SECRET#fragment',
+                isApply=False, isFromXyx=False, isReprintJob='0', isJump='0', isExpire=False)
+
+
+def job51_card():
+    return dict(job_id='123', title='产品经理', company='公司A', salary='10K', href='', tags='本科')
+
+
+def job51_packet(items):
+    return SimpleNamespace(response=SimpleNamespace(body={'resultbody': {'job': {'items': items}}}))
+
+
+def job51_adapter(tab, browser=None):
+    browser = browser or SimpleNamespace(new_tab=lambda *a:pytest.fail('不得新开详情标签'))
+    adapter = adapters.PlatformAdapter('51job', browser, SimpleNamespace(job='产品经理'), '123')
+    adapter.search_tab = tab
+    return adapter
+
+
+@pytest.mark.parametrize('existing', [False, True])
+def test_51job_search_last_filter_packet_and_next_page(monkeypatch, existing):
+    events=[]
+    initial=job51_item(); final={**initial, 'jobDescribe':'筛选后的完整 JD'}
+    tab=Job51Tab(events)
+    def new_tab():
+        events.append('new_tab')
+        return tab
+    browser=SimpleNamespace(get_tabs=lambda:[tab] if existing else [], new_tab=new_tab)
+    adapter=job51_adapter(tab, browser);adapter.search_tab=None
+    monkeypatch.setattr(adapters.time,'sleep',lambda seconds:None)
+    original_get = tab.get
+    # 导航与筛选分别产生一包，最后一包才可用于当前列表。
+    def navigate(url):
+        original_get(url)
+        tab.listen.packets.append(job51_packet([initial]))
+    tab.get=navigate
+    def filters():
+        events.append('filters')
+        tab.listen.packets.append(job51_packet([final]))
+    adapter.apply_filters=filters
+    adapter.search()
+    assert adapter.job51_items=={'123':final}
+    assert events[0 if existing else 1]==('listen', ('we.51job.com/api/job/search-pc',), {})
+    assert events[-1]=='stop'
+    assert [e[0] for e in events if isinstance(e,tuple)]==['listen','get','wait','wait','wait']
+    final={**final, 'jobId':'456'}
+    assert adapter.next_page(2) and adapter.job51_items=={'456':final}
+    assert 'pageNum=2' in tab.url and events.count('stop')==2
+
+
+@pytest.mark.parametrize('body', [None, {}, {'resultbody':None},
+    {'resultbody':{'job':{'items':{}}}}, {'resultbody':{'job':{'items':[None]}}},
+    {'resultbody':{'job':{'items':[{'jobId':123}]}}}, '不是 JSON'])
+def test_51job_search_missing_or_bad_last_packet_clears_stale(monkeypatch, body):
+    events=[]
+    packets=[] if body is None else [job51_packet([job51_item()]), SimpleNamespace(response=SimpleNamespace(body=body))]
+    tab=Job51Tab(events, packets);adapter=job51_adapter(tab)
+    adapter.job51_items={'old':job51_item()}
+    adapter.apply_filters=lambda:None
+    monkeypatch.setattr(adapters.time,'sleep',lambda seconds:None)
+    with pytest.raises(adapters.AdapterError,match='51job 搜索接口未返回岗位数据'):
+        adapter.search()
+    assert adapter.job51_items=={} and events[-1]=='stop'
+
+
+def test_51job_search_wait_capped_at_20_seconds(monkeypatch):
+    events=[];clock=[0];tab=Job51Tab(events);adapter=job51_adapter(tab)
+    monkeypatch.setattr(adapters.time,'sleep',lambda seconds:None)
+    monkeypatch.setattr(adapters.time,'monotonic',lambda:clock[0])
+    adapter.apply_filters=lambda:None
+    def wait(timeout, raise_err):
+        assert not raise_err and 0 < timeout <= 3
+        clock[0]+=min(1, timeout)
+        return job51_packet([{**job51_item(),'jobDescribe':str(clock[0])}])
+    tab.listen.wait=wait
+    adapter.search()
+    assert clock[0]==20 and adapter.job51_items['123']['jobDescribe']=='20'
+    assert events[-1]=='stop'
+
+
+@pytest.mark.parametrize('state,applied,external,reason', [
+    ({}, False, False, '转载/外跳/过期岗位'),
+    ({'isApply':True}, True, False, '转载/外跳/过期岗位'),
+    ({'isApply':1}, False, False, '转载/外跳/过期岗位'),
+    ({'isFromXyx':True}, False, True, '校招岗位（应届生网），请用 yingjiesheng_apply.py 投递'),
+    ({'isReprintJob':'1'}, False, True, '转载/外跳/过期岗位'),
+    ({'isJump':'1'}, False, True, '转载/外跳/过期岗位'),
+    ({'isExpire':True}, False, True, '转载/外跳/过期岗位'),
+])
+def test_51job_cards_join_api_by_id_and_title(state,applied,external,reason):
+    tab=Job51Tab([],cards=[job51_card()]);adapter=job51_adapter(tab)
+    adapter.job51_items={'123':{**job51_item(), 'jobName':' 产品经理 ', **state}}
+    card=adapter.cards()[0]
+    assert card['jd']=='产品需求 AI 实习' and card['already_applied'] is applied
+    assert card['external'] is external and card['external_reason']==reason
+    assert card['url']=='https://jobs.51job.com/shenzhen/123.html'
+
+
+@pytest.mark.parametrize('items', [{}, {'456':job51_item()}, {'123':{**job51_item(),'jobName':'销售'}},
+    {'123':{**job51_item(),'jobDescribe':''}}, {'123':{**job51_item(),'jobDescribe':None}}])
+def test_51job_unmatched_cards_review_without_jev(tmp_path,monkeypatch,items):
+    tab=Job51Tab([],cards=[job51_card()]);adapter=job51_adapter(tab);adapter.job51_items=items
+    adapter.search=lambda:None;adapter.check=lambda:('','');adapter.next_page=lambda n:False
+    assert adapter.cards()[0]['jd']==''
+    cfg=config(tmp_path);cfg['resume_path']='resume.txt';(tmp_path/'resume.txt').write_text('测试简历')
+    monkeypatch.setattr(runner.jev,'load_jev_key',lambda:'test-key')
+    for name in ('match_title','match_job','latest_match'):
+        monkeypatch.setattr(runner.jev,name,lambda *a,**kw:pytest.fail('空 JD 不得调 Jev/缓存'))
+    monkeypatch.setattr(runner,'submit',lambda *a,**kw:pytest.fail('空 JD 不得提交'))
+    parsed=runner.parse_args({'深圳':'123'},['--job','产品经理','--dry-run'],platform='51job')
+    stats=runner.execute('51job',parsed,cfg,adapter,tmp_path,rest=lambda *a:None)
+    assert stats['review']==1 and not stats['applied']
+    assert load_log(tmp_path/'51job-深圳-log.json')['review'][0]['reason']=='卡片与详情 ID/标题不匹配，或 JD 为空'
+
+
+@pytest.mark.parametrize('label,disabled,ready', [('投递',None,True),('已投递',None,False),('投递','',False)])
+def test_51job_open_detail_uses_list_button_without_click(label,disabled,ready):
+    tab=Job51Tab([],cards=[job51_card()]);adapter=job51_adapter(tab)
+    tab.button.text=label;tab.disabled=disabled
+    card={**job51_card(),'jd':'完整 JD','url':'https://jobs.51job.com/shenzhen/123.html'}
+    detail=adapter.open_detail(card)
+    assert detail=={k:card[k] for k in ('job_id','title','jd','company','url')} | {'button_state':label,'button_ready':ready}
+    assert adapter.current is card and adapter.detail_tab is None
+    assert same_job(card,adapter.detail_snapshot())
+    assert adapter.verified_button({**card,'job_id':'456'}) is None
+    assert adapter.verified_button({**card,'title':'销售'}) is None
+    for changed in ({**job51_card(),'job_id':'456'}, {**job51_card(),'title':'销售'}):
+        tab.items=[changed]
+        assert adapter.verified_button(card) is None
+    tab.items=[]
+    assert adapter.verified_button(card) is None
+    assert adapter.open_detail(card)=={}
+    adapter.close_detail()
+
+
+@pytest.mark.parametrize('dry_run', [False,True])
+def test_51job_external_reason_skips_before_jev(tmp_path,monkeypatch,dry_run):
+    cfg=config(tmp_path);cfg['resume_path']='resume.txt';(tmp_path/'resume.txt').write_text('测试简历')
+    monkeypatch.setattr(runner.jev,'load_jev_key',lambda:'test-key')
+    for name in ('match_title','match_job','latest_match'):
+        monkeypatch.setattr(runner.jev,name,lambda *a,**kw:pytest.fail('外跳岗位不得调 Jev/缓存'))
+    reason='校招岗位（应届生网），请用 yingjiesheng_apply.py 投递'
+    adapter=FakeAdapter([{**job51_card(),'external':True,'external_reason':reason}])
+    parsed=runner.parse_args({'深圳':'123'},['--job','产品经理',*(['--dry-run'] if dry_run else [])],platform='51job')
+    stats=runner.execute('51job',parsed,cfg,adapter,tmp_path,rest=lambda *a:None)
+    assert stats['skip']==1 and not adapter.opened
+    assert load_log(tmp_path/'51job-深圳-log.json')['skipped'][0]['reason']==reason
 
 
 def seed_approved(tmp_path, platform='liepin', approved=('1', '2'), ids=('1', '2', '3')):

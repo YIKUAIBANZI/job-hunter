@@ -36,7 +36,7 @@ origin: local
 
 应届生本阶段仅离线实现。只监听页面搜索/详情请求，详情新建标签直接导航并清理；申请仍按 ID + 标题核验，仅原生点击可见“立即申请”。`--job-type/--experience/--degree` 非空直接报错，用关键词 + Jev 硬条件。卡片已申请/转载/过期在开详情前跳过，详情志愿状态与简历完整度先于 Jev 和缓存判断；需换志愿或补信息进复核，不调 Jev。可见 `.delivery-tip` 按文字复核，点击后任何 `.el-dialog` 保留 pending 并停止，绝不操作弹窗按钮。
 
-应届生支持 `--approved`，同样新建详情标签、读状态并核验身份，不调 Jev；未校准门禁不变，真实首单必须 `--calibrate --job-id <已确认ID> --count 1`。`VERIFIED_ENDPOINTS` 的 `/open/yjs/apply` 条件来自前端 JS：外层 status 与 resultbody.items[0].status 均为 1；证据仅新增 outer_status/nested_status 短码。维护者完成实测后才能加入 `CALIBRATED`。节奏同 51job，默认详情上限 20；日志/冷却/缓存前缀为 `yingjiesheng`、`yingjiesheng`、`jev-yingjiesheng`，现有忽略规则已覆盖。
+应届生支持 `--approved`，同样新建详情标签、读状态并核验身份，不调 Jev；未校准门禁不变，真实首单必须 `--calibrate --job-id <已确认ID> --count 1`。`VERIFIED_ENDPOINTS` 的 `/open/yjs/apply` 条件来自前端 JS：外层 status 与 resultbody.items[0].status 均为 1；证据仅新增 outer_status/nested_status 短码。维护者完成实测后才能加入 `CALIBRATED`。保持详情间隔 15–30 秒、每 5 份休息 90–180 秒、默认详情上限 20；日志/冷却/缓存前缀为 `yingjiesheng`、`yingjiesheng`、`jev-yingjiesheng`，现有忽略规则已覆盖。
 
 人工复核使用 `python3 review_list.py [--city 深圳]` 生成 `复核清单.md`。用户看过岗位并将批准列改为 `[x]` 后，BOSS/猎聘/鱼泡可用 `--approved --city 深圳 --count 1`；不需要 `--job`，不搜索、不读取 Jev key/简历、不调 Jev。只采用日志中同平台、同城市且已勾选的 ID 与详情 URL，清单编辑不替代岗位身份核验；重新生成保留仍在清单的勾选，已 applied/pending 自动移除。51job 行为 `—`，禁止批准投递，需人工页面处理。
 
@@ -44,8 +44,9 @@ origin: local
 
 - 猎聘支持 `--degree 本科` 等单个学历值（博士、硕士、本科、大专、中专/中技、高中、初中及以下），原生打开下拉，只点击可见选项并校验选中状态；逗号多值报错。
 - 鱼泡无实习/学历/经验筛选，学历和经验下拉不能可靠筛选列表。三个筛选参数默认空值；非空即报错。使用关键词（如“AI产品实习”）并依赖 Jev 硬条件。页面为 `yupao.com`，业务证据还需收取 `yupaowang.com`；只有已校准精确端点能确认网络成功。
-- 51job 面向 27 届秋招校招用 `--job-type 全职 --experience 在校生/应届生`，可加 `--degree 本科`；实习岗位用 `--job-type 实习`。经验别名“在校生”“应届生”“在校生,应届生”均映射为“在校生/应届生”。应届生外链不在本适配器的提交范围。
-- 51job 详情风控更敏感：间隔 15–30 秒，每 5 份额外休息 90–180 秒，`--max-views` 默认 20，显式值优先（1–60）。猎聘/鱼泡保持 6–15 秒、每 10 份休息 45–90 秒、默认 60 份。慢节奏不保证免受风控。
+- 51job JD 取自搜索页自身请求的 `we.51job.com/api/job/search-pc`，导航前监听、原生筛选后取最后一包 `resultbody.job.items`，不重放接口、不开详情页。按卡片 sensorsdata 的 jobId + jobTitle 关联 JD 和核验列表“投递”按钮；缺项、标题不一致或 JD 为空先复核，不调 Jev。已申请跳过；校招岗位（`isFromXyx=True`）交给 `yingjiesheng_apply.py`，转载/外跳/过期跳过。本阶段仅离线验证，首单门禁与 `--approved` 禁令不变。
+- 51job 面向 27 届秋招校招用 `--job-type 全职 --experience 在校生/应届生`，可加 `--degree 本科`；实习岗位用 `--job-type 实习`。经验别名“在校生”“应届生”“在校生,应届生”均映射为“在校生/应届生”。
+- 51job 列表 JD 评估间隔 6–12 秒，每 8 份额外休息 60–120 秒，`--max-views` 默认 30（views 为评估间隔，不开详情），显式值优先（1–60）。猎聘/鱼泡保持 6–15 秒、每 10 份休息 45–90 秒、默认 60 份。慢节奏不保证免受风控，搜索页风控检测照旧。
 
 ## 日志与交付
 
