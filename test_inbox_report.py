@@ -77,12 +77,12 @@ def test_render_tables_counts_escape_and_truncate():
     delivered = item('不列送达公司', status='[送达]')
     rows = [replied, read, delivered, item('未知公司', status='异常')]
     before = copy.deepcopy(rows)
-    md = report.render_report(rows, 3, NOW)
+    md = report.render_report(rows, [], NOW)
     assert '生成时间：2026-10-14 18:00:00+08:00' in md
     assert 'Boss：会话 4｜HR 已回复 1｜已读未回 1｜仅送达 1' in md
-    assert '猎聘未读 3（请在猎聘网页手动查看）' in md
-    assert '状态未知：1' in md
-    replied_table, read_table = md.split('## 已读未回')
+    assert '猎聘：会话 0｜HR 已回复 0' in md
+    assert 'Boss 状态未知：1' in md
+    replied_table, read_table = md.split('## 猎聘')[0].split('## Boss｜已读未回')
     assert '| 公司 | 岗位 | 招聘者 | 时间 | 最后一条消息 |' in replied_table
     assert '| 公&#124;司 A | 产&#124;品 | 张 招聘 | 18:00 |' in replied_table
     assert '&lt;img&gt;' in md and '\\[链接\\]' in md and '\\`代码\\`' in md
@@ -90,18 +90,31 @@ def test_render_tables_counts_escape_and_truncate():
     assert '文' * 60 not in md and '…' in md
     assert '| 公司 | 岗位 | 时间 |' in read_table
     assert '| 公司B | 开发 | 18:00 |' in read_table
-    assert '不列送达公司' not in md and '仅送达：1 个会话' in md
+    assert '不列送达公司' not in md and 'Boss 仅送达：1 个会话' in md
     assert rows == before
 
 
+def test_liepin_status_and_platform_tips():
+    # 猎聘 [未读] 是对方未读我的消息；平台提示没有状态元素但不算 HR 回复
+    assert report.classify_boss_item(item(status='[未读]')) == 'delivered'
+    assert report.classify_boss_item(item(status='[已读]')) == 'read'
+    for tip in ('您可以修改打招呼语，去修改＞＞', '我们为您生成了合适的打招呼语，去使用＞'):
+        assert report.classify_boss_item({**item(), 'last_msg': tip}) == 'delivered'
+    assert report.classify_boss_item({**item(), 'last_msg': '你好，看了你的简历，方便聊聊吗？'}) == 'replied'
+    md = report.render_report([], [{**item('冰兰'), 'job': '产品'}], NOW)
+    assert '猎聘：会话 1｜HR 已回复 1' in md and '## 猎聘｜HR 已回复（优先处理）' in md
+    assert '| 冰兰 | 产品 |' in md
+
+
 def test_render_empty_and_unmatched():
-    md = report.render_report([], 0, NOW)
-    assert md.count('暂无') == 2
-    assert '会话 0｜HR 已回复 0｜已读未回 0｜仅送达 0' in md
-    assert '猎聘未读 0' in md
+    md = report.render_report([], [], NOW)
+    assert md.count('暂无') == 4
+    assert 'Boss：会话 0｜HR 已回复 0｜已读未回 0｜仅送达 0' in md
+    assert '猎聘：会话 0｜HR 已回复 0' in md
     rows = report.match_applied([item()], {})
     assert '| 公司A | 非本工具投递 |' in report.render_report(rows, None, NOW)
-    assert '猎聘未读 未读取（--no-liepin）' in report.render_report([], None, NOW)
+    md = report.render_report([], None, NOW)
+    assert '猎聘：未读取（--no-liepin）' in md and '## 猎聘' not in md
 
 
 @pytest.fixture
@@ -119,7 +132,8 @@ def offline(monkeypatch, tmp_path):
     sleeps, checks, tabs = [], [], []
     monkeypatch.setattr(report.time, 'sleep', sleeps.append)
     monkeypatch.setattr(report.random, 'uniform', lambda a, b: a)
-    state = dict(block_phase='', nav_error=False, unread='4', bad_snapshot=False,
+    state = dict(block_phase='', nav_error=False, bad_snapshot=False, no_entry=False,
+                 liepin=[item('猎聘公司'), item('猎聘公司B', status='[未读]')],
                  close_error=False)
 
     class Tab:
@@ -127,7 +141,15 @@ def offline(monkeypatch, tmp_path):
         closed = False
         phase = 'new'
         scrolls = 0
-        click = input = eles = ele = forbidden
+        click = input = eles = forbidden
+
+        def ele(self, selector, timeout=None):
+            # 只允许定位“我的沟通”入口；点击它只展开会话列表
+            assert selector == 'css:.im-ui-basic-entry'
+            if state['no_entry']:
+                return None
+            tab = self
+            return SimpleNamespace(click=lambda: setattr(tab, 'phase', 'liepin_open'))
 
         def get(self, url):
             self.url = url
@@ -146,9 +168,10 @@ def offline(monkeypatch, tmp_path):
                 self.phase = 'scroll'
                 self.scrolls += 1
                 return True
-            if script == report.LIEPIN_UNREAD_JS:
+            if script == report.LIEPIN_ITEMS_JS:
+                assert self.phase == 'liepin_open'
                 self.phase = 'liepin_read'
-                return state['unread']
+                return state['liepin']
             forbidden()
 
         def close(self):
@@ -186,11 +209,11 @@ def test_main_readonly_bounds_and_own_tab_cleanup(offline, no_liepin, capsys):
     assert len(h.tabs) == (1 if no_liepin else 2)
     assert all(tab.closed for tab in h.tabs)
     assert h.tabs[0].url == report.BOSS_URL and h.tabs[0].scrolls == 5
-    assert h.sleeps == [5] + [1.5] * 5 + ([] if no_liepin else [5])
+    assert h.sleeps == [5] + [1.5] * 5 + ([] if no_liepin else [5, 3])
     md = h.path.read_text(encoding='utf-8')
     assert '会话 7｜HR 已回复 7' in md and '| 公司0 | 产品实习 |' in md
-    assert ('猎聘未读 未读取' if no_liepin else '猎聘未读 4') in md
-    assert '已更新｜Boss 会话 7' in capsys.readouterr().out
+    assert ('猎聘：未读取' if no_liepin else '猎聘：会话 2｜HR 已回复 1｜已读未回 0｜仅送达 1') in md
+    assert '已更新｜Boss：会话 7' in capsys.readouterr().out
     # 一个快照必须被前后两次风控检查夹住。
     assert sum(phase == 'boss_read' for _, phase in h.checks) >= 6
 
@@ -227,16 +250,12 @@ def test_read_failure_preserves_report_and_closes(offline, kind):
     assert all(tab.closed for tab in offline.tabs)
 
 
-@pytest.mark.parametrize('raw,expected', [(None, 0), ('0', 0), (' 12 ', 12)])
-def test_liepin_count_absent_and_integer(offline, raw, expected):
-    offline.state['unread'] = raw
-    assert report.main([]) == 0
-    assert f'猎聘未读 {expected}' in offline.path.read_text()
-
-
-@pytest.mark.parametrize('raw', ['', '99+', '-1', '异常'])
-def test_liepin_bad_count_preserves_report(offline, raw):
-    offline.state['unread'] = raw
+@pytest.mark.parametrize('kind', ['bad_list', 'bad_row', 'no_entry'])
+def test_liepin_bad_list_preserves_report(offline, kind):
+    if kind == 'no_entry':
+        offline.state['no_entry'] = True
+    else:
+        offline.state['liepin'] = None if kind == 'bad_list' else ['异常']
     assert report.main([]) == 1
     assert offline.path.read_text() == '上次日报'
     assert all(tab.closed for tab in offline.tabs)

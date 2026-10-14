@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""只读回复日报：只读取列表，不打开会话、不输入、不发送。"""
+"""只读回复日报：只读取列表，不打开会话、不输入、不发送。
+
+猎聘会话列表需点击“我的沟通”入口展开抽屉；只点入口，不点任何会话。
+"""
 
 import argparse
 import html
@@ -12,7 +15,8 @@ from pathlib import Path
 
 REPORT_FILE = '回复日报.md'
 BOSS_URL = 'https://www.zhipin.com/web/geek/chat'
-LIEPIN_URL = 'https://c.liepin.com/'
+# c.liepin.com 首页的入口点不开抽屉，www 域名的列表/详情页可以（实机确认）
+LIEPIN_URL = 'https://www.liepin.com/zhaopin/'
 
 
 # ---------- 纯函数 ----------
@@ -24,14 +28,17 @@ def classify_boss_item(item) -> str:
     status = item.get('status')
     if status is None:
         # 平台系统消息（如“您的附件简历…已发送给Boss”）也没有状态元素，不算 HR 回复
-        if re.search(r'附件简历.*已发送|已发送给Boss', str(item.get('last_msg') or '')):
+        # 猎聘同理：“您可以修改打招呼语”“为您生成了合适的打招呼语”是平台提示
+        if re.search(r'附件简历.*已发送|已发送给Boss|修改打招呼语|生成了合适的打招呼语',
+                     str(item.get('last_msg') or '')):
             return 'delivered'
         return 'replied'
     if not isinstance(status, str):
         return 'unknown'
     if '已读' in status:
         return 'read'
-    if '送达' in status:
+    # 猎聘的“[未读]”指对方还没读我的消息，等同送达
+    if '送达' in status or '未读' in status:
         return 'delivered'
     return 'unknown'
 
@@ -87,25 +94,40 @@ def _counts(items):
     return Counter(classify_boss_item(item) for item in items)
 
 
-def render_report(boss_items, liepin_unread, now) -> str:
-    counts = _counts(boss_items)
+def _summary(label, items):
+    counts = _counts(items)
+    return (f'{label}：会话 {len(items)}｜HR 已回复 {counts["replied"]}｜'
+            f'已读未回 {counts["read"]}｜仅送达 {counts["delivered"]}')
+
+
+def render_report(boss_items, liepin_items, now) -> str:
+    """liepin_items 为 None 表示未读取（--no-liepin）。"""
     generated = now.isoformat(sep=' ', timespec='seconds') if isinstance(now, datetime) else _text(now)
-    liepin = '未读取（--no-liepin）' if liepin_unread is None else str(liepin_unread)
+    liepin = ('猎聘：未读取（--no-liepin）' if liepin_items is None
+              else _summary('猎聘', liepin_items))
     lines = ['# 回复日报', '', f'生成时间：{_cell(generated)}', '',
-             f'Boss：会话 {len(boss_items)}｜HR 已回复 {counts["replied"]}｜已读未回 {counts["read"]}｜仅送达 {counts["delivered"]}',
-             f'猎聘未读 {liepin}（请在猎聘网页手动查看）', '',
-             '仅汇总当前加载到的会话，最多滚动 5 次；不代表全部历史会话。',
+             _summary('Boss', boss_items), liepin, '',
+             '仅汇总当前加载到的会话，Boss 最多滚动 5 次；不代表全部历史会话。',
              '公司匹配仅用于关联投递记录，同公司多个岗位全部列出，不能确认回复对应的具体岗位。',
              '岗位标为“非本工具投递”表示未匹配所选城市的 applied 日志。', '']
+    sections = [('Boss', boss_items)] + ([('猎聘', liepin_items)] if liepin_items is not None else [])
+    for platform, items in sections:
+        lines += _render_platform(platform, items)
+    return '\n'.join(lines)
+
+
+def _render_platform(platform, items) -> list[str]:
+    counts = _counts(items)
+    lines = []
     if counts['unknown']:
-        lines += [f'状态未知：{counts["unknown"]}', '']
+        lines += [f'{platform} 状态未知：{counts["unknown"]}', '']
     for state, heading, headers, fields in (
         ('replied', 'HR 已回复（优先处理）', ['公司', '岗位', '招聘者', '时间', '最后一条消息'],
          ('company', 'job', 'name', 'time', 'last_msg')),
         ('read', '已读未回', ['公司', '岗位', '时间'], ('company', 'job', 'time')),
     ):
-        lines += [f'## {heading}', '']
-        rows = [item for item in boss_items if classify_boss_item(item) == state]
+        lines += [f'## {platform}｜{heading}', '']
+        rows = [item for item in items if classify_boss_item(item) == state]
         if not rows:
             lines += ['暂无', '']
             continue
@@ -122,8 +144,8 @@ def render_report(boss_items, liepin_unread, now) -> str:
                 values.append(_cell(value) or '—')
             lines.append('| ' + ' | '.join(values) + ' |')
         lines.append('')
-    lines += [f'仅送达：{counts["delivered"]} 个会话', '']
-    return '\n'.join(lines)
+    lines += [f'{platform} 仅送达：{counts["delivered"]} 个会话', '']
+    return lines
 
 
 # ---------- 页面读取（仅 DOM 读取与列表滚动） ----------
@@ -157,9 +179,23 @@ BOSS_SCROLL_JS = """
     return false;
 """
 
-LIEPIN_UNREAD_JS = """
-    const e = document.querySelector('.im-ui-basic-entry-unread-count');
-    return e ? (e.innerText || '').trim() : null;
+LIEPIN_ITEMS_JS = """
+    return [...document.querySelectorAll('.im-ui-contact-item')].map(item => {
+        const text = selector => {
+            const e = item.querySelector(selector);
+            return e ? (e.innerText || '').trim() : '';
+        };
+        const status = item.querySelector('.im-ui-message-read-status');
+        // 副标题形如“HRBP·深圳某某科技有限公司”，公司取第一个“·”之后
+        const sub = text('.im-ui-contact-title-sub');
+        const i = sub.indexOf('·');
+        let last = text('.im-ui-last-message');
+        if (status) last = last.replace((status.innerText || '').trim(), '').trim();
+        return {name: text('.im-ui-contact-title-name'),
+                title: i >= 0 ? sub.slice(0, i) : '', company: i >= 0 ? sub.slice(i + 1) : sub,
+                time: text('.contact-time'), last_msg: last,
+                status: status ? (status.innerText || '').trim() : null};
+    });
 """
 
 
@@ -184,15 +220,20 @@ def read_boss_items(tab, check_block) -> list[dict]:
     return items
 
 
-def read_liepin_unread(tab, check_block) -> int:
+def read_liepin_items(tab, check_block) -> list[dict]:
+    """原生点击“我的沟通”入口展开抽屉后读取列表；不点击任何会话。"""
     check_block(tab)
-    raw = tab.run_js(LIEPIN_UNREAD_JS)
+    entry = tab.ele('css:.im-ui-basic-entry', timeout=5)
+    if not entry:
+        raise ValueError('猎聘“我的沟通”入口未找到')
+    entry.click()
+    time.sleep(random.uniform(3, 4))
     check_block(tab)
-    if raw is None:
-        return 0
-    if not isinstance(raw, str) or not re.fullmatch(r'[0-9]+', raw.strip()):
-        raise ValueError('猎聘未读数不是整数，请手动核对页面')
-    return int(raw.strip())
+    items = tab.run_js(LIEPIN_ITEMS_JS)
+    check_block(tab)
+    if not isinstance(items, list) or any(not isinstance(row, dict) for row in items):
+        raise ValueError('猎聘会话列表读取结果异常')
+    return dedup_boss_items(items)
 
 
 class PageBlocked(RuntimeError):
@@ -200,9 +241,9 @@ class PageBlocked(RuntimeError):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='只读汇总 Boss 回复与猎聘未读数，不打开任何会话')
+    parser = argparse.ArgumentParser(description='只读汇总 Boss 与猎聘会话回复，不打开任何会话')
     parser.add_argument('--city', default='深圳', help='匹配 boss-<城市>-log.json（默认深圳，不过滤会话）')
-    parser.add_argument('--no-liepin', action='store_true', help='不打开猎聘标签、不读取未读数')
+    parser.add_argument('--no-liepin', action='store_true', help='不打开猎聘标签、不读取猎聘会话')
     args = parser.parse_args(argv)
 
     # 延迟导入，让纯函数及 --help 不依赖浏览器连接，也不读取个人配置。
@@ -242,11 +283,13 @@ def main(argv=None):
 
         boss_tab = open_tab(BOSS_URL)
         boss_items = match_applied(read_boss_items(boss_tab, check_block), log)
-        liepin_unread = None if args.no_liepin else read_liepin_unread(open_tab(LIEPIN_URL), check_block)
+        liepin_items = None if args.no_liepin else match_applied(
+            read_liepin_items(open_tab(LIEPIN_URL), check_block),
+            load_log(root / f'liepin-{args.city}-log.json'))
         # 猎聘读取期间 Boss 也可能出现风控，写报告前再次检查所有自建标签。
         for tab in tabs:
             check_block(tab)
-        report = render_report(boss_items, liepin_unread, datetime.now().astimezone())
+        report = render_report(boss_items, liepin_items, datetime.now().astimezone())
     except PageBlocked as exc:
         print(f'风控：{exc}；停止，日报未更新')
         return 1
@@ -265,9 +308,8 @@ def main(argv=None):
     except OSError as exc:
         print(f'日报写入失败：{exc}')
         return 1
-    counts = _counts(boss_items)
-    liepin = '未读取' if liepin_unread is None else str(liepin_unread)
-    print(f'{REPORT_FILE} 已更新｜Boss 会话 {len(boss_items)}｜HR 已回复 {counts["replied"]}｜已读未回 {counts["read"]}｜仅送达 {counts["delivered"]}｜猎聘未读 {liepin}')
+    liepin = '猎聘未读取' if liepin_items is None else _summary('猎聘', liepin_items)
+    print(f'{REPORT_FILE} 已更新｜{_summary("Boss", boss_items)}｜{liepin}')
     return 0
 
 

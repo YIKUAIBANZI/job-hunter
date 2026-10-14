@@ -332,8 +332,9 @@ def run_daily(plan, *, live=False, no_rest=False, root=None) -> dict:
     if inbox_path.exists():
         try:
             header = '\n'.join(inbox_path.read_text(encoding='utf-8').splitlines()[:12])
-            match = re.search(r'HR\s*已回复\s*(\d+)', header)
-            results['hr_replied'] = int(match[1]) if match else None
+            # Boss 与猎聘各一行统计，合计
+            found = re.findall(r'HR\s*已回复\s*(\d+)', header)
+            results['hr_replied'] = sum(map(int, found)) if found else None
         except (OSError, ValueError) as exc:
             results['notes'].append(f'回复日报不可读：{type(exc).__name__}')
     results['inbox_note'] = ('本次读取，详见 回复日报.md' if inbox_ok and results['hr_replied'] is not None else
