@@ -574,7 +574,11 @@ class PlatformAdapter:
                 if element is None:
                     return False
                 element.click(by_js=False)
-                packet = self.search_tab.listen.wait(timeout=15, raise_err=False)
+                # 实测偶发 15 秒内无包（单独复现 2/3/4 页均正常）；多等一次，仍无则结束翻页而非中断整轮
+                packet = (self.search_tab.listen.wait(timeout=15, raise_err=False)
+                          or self.search_tab.listen.wait(timeout=10, raise_err=False))
+                if not packet:
+                    return False
                 try:
                     items = _packet_body(packet)['resultbody']['job']['items']
                     if not isinstance(items, list) or any(
