@@ -75,6 +75,8 @@ def yjs_apply_state(state):
     incomplete = state.get('isIncomplete')
     if incomplete is True or incomplete == 1 or str(incomplete).lower() in ('1', 'true'):
         return False, 'review', '简历不完整，请先完善'
+    if str(state.get('isxyzapply', '')) == '5':
+        return False, 'form', '需补充企业要求的信息，请人工处理'
     if str(state.get('jobjumptype', '')) == '2':
         volunteer = str(state.get('isxyzapply', ''))
         if volunteer == '0':
@@ -85,8 +87,6 @@ def yjs_apply_state(state):
             return False, 'skip', '已申请该公司其他职位且已被处理'
         if volunteer == '4':
             return False, 'review', '需替换志愿，请人工处理'
-        if volunteer == '5':
-            return False, 'review', '需补充企业要求的信息，请人工处理'
         return False, 'review', '志愿状态未知'
     if str(state.get('isapply', '')) == '1':
         return False, 'skip', '平台显示已申请'

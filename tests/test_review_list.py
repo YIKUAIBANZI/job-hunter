@@ -107,3 +107,18 @@ def test_yjs_review_list_approval_regeneration_and_pending_exclusion(tmp_path,mo
     review.main(['--city','深圳'])
     assert '| 123 |' not in path.read_text()
     assert not review.approved_review_rows(tmp_path,'yingjiesheng','深圳')
+
+
+def test_manual_form_rows_not_approvable(tmp_path):
+    import json
+    from review_list import approved_review_rows, render_review_list, REVIEW_FILE
+    from shared import log_path, report_path
+    row = dict(platform='yingjiesheng', job_id='9', job='产品经理', company='公司A', manual_form=True,
+               reason='[需表单]匹配达到推荐阈值', ts='2026-10-15T10:00:00+08:00')
+    md = render_review_list([row], {'yingjiesheng:9'})
+    assert '| — | yingjiesheng |' in md and '需在平台填写企业表单' in md
+    path = log_path(tmp_path, 'yingjiesheng', '深圳'); path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({'review': [row]}), encoding='utf-8')
+    rp = report_path(tmp_path, REVIEW_FILE); rp.parent.mkdir(parents=True)
+    rp.write_text(md.replace('| — | yingjiesheng |', '| [x] | yingjiesheng |'), encoding='utf-8')
+    assert approved_review_rows(tmp_path, 'yingjiesheng', '深圳') == []

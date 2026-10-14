@@ -1,4 +1,4 @@
-"""从 Boss 队列查找官方招聘入口；只读搜索和网页，不提交投递表单。"""
+"""从各平台对口岗位整理官网、JD 邮箱及手动表单；不提交投递。"""
 
 import argparse
 import copy
@@ -8,14 +8,14 @@ import math
 import os
 import re
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.client import HTTPException
 from pathlib import Path
 from urllib import error, request
 from urllib.parse import unquote, urlsplit
 
 from jev_match import JEV_MODEL, JEV_URL, JevError, load_jev_key
-from shared import cache_path, report_path
+from shared import cache_path, extract_emails, log_path, report_path
 
 TAVILY_URL = "https://api.tavily.com/search"
 AGGREGATORS = [
@@ -36,6 +36,8 @@ CACHE_TTL = timedelta(days=30)
 MAX_CANDIDATES = 6
 MAX_PAGE_BYTES = 200 * 1024
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36"
+PLATFORM_LABELS = {'boss': 'boss', 'liepin': '猎聘', 'yingjiesheng': '应届生',
+                   '51job': '51job', 'yupao': '鱼泡'}
 
 
 class SearchError(Exception):
@@ -46,10 +48,12 @@ def normalize_company(company: str) -> str:
     return "".join(company.split()).lower()
 
 
-def collect_companies(directory: Path) -> list[dict]:
-    """合并所有 Boss 日志；review 本身入选，skipped 不因 apply 再入选。"""
-    companies = {}
-    for path in sorted((Path(directory) / "data" / "logs").glob("boss-*-log.json")):
+def _log_records(directory):
+    """只读统一日志目录；坏日志和未知平台不影响其他公司。"""
+    for path in sorted(log_path(directory, 'boss', '').parent.glob('*-log.json')):
+        platform = path.name.split('-', 1)[0]
+        if platform not in PLATFORM_LABELS:
+            continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -62,21 +66,58 @@ def collect_companies(directory: Path) -> list[dict]:
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                if not (bucket in ("applied", "pending", "review") or (
-                    bucket not in ("review", "skipped") and row.get("decision") == "apply"
-                )):
-                    continue
-                company = row.get("company")
-                if not isinstance(company, str) or not normalize_company(company):
-                    continue
-                entry = companies.setdefault(normalize_company(company), {
-                    "company": company.strip(), "jobs": [], "boss_urls": [],
-                })
-                for field, target in (("job", "jobs"), ("url", "boss_urls")):
-                    value = row.get(field)
-                    if isinstance(value, str) and value.strip() and value.strip() not in entry[target]:
-                        entry[target].append(value.strip())
+                yield platform, bucket, row
+
+
+def collect_companies(directory: Path) -> list[dict]:
+    """合并各平台 applied/review；skipped/failed 不因 decision=apply 入选。"""
+    companies = {}
+    for platform, bucket, row in _log_records(directory):
+        if bucket not in ('applied', 'review'):
+            continue
+        company = row.get('company')
+        if not isinstance(company, str) or not normalize_company(company):
+            continue
+        entry = companies.setdefault(normalize_company(company), {
+            'company': company.strip(), 'jobs': [], 'sources': [], 'emails': [], 'boss_urls': [],
+        })
+        job = row.get('job') if isinstance(row.get('job'), str) else ''
+        url = row.get('url') if isinstance(row.get('url'), str) else ''
+        job, url = job.strip(), url.strip()
+        if job and job not in entry['jobs']:
+            entry['jobs'].append(job)
+        source = dict(platform=platform, job=job, url=url, bucket=bucket)
+        if source not in entry['sources']:
+            entry['sources'].append(source)
+        if platform == 'boss' and url and url not in entry['boss_urls']:
+            entry['boss_urls'].append(url)
+        for value in row.get('emails', []) if isinstance(row.get('emails'), list) else []:
+            for email in extract_emails(value if isinstance(value, str) else ''):
+                if email not in entry['emails']:
+                    entry['emails'].append(email)
     return list(companies.values())
+
+
+def collect_manual_forms(directory: Path) -> list[dict]:
+    """应届生按 ID 取最新记录；已投过的岗位不再提示手动表单。"""
+    latest, applied = {}, set()
+    for platform, bucket, row in _log_records(directory):
+        if platform != 'yingjiesheng':
+            continue
+        job_id = str(row.get('job_id') or row.get('jobId') or '')
+        if not re.fullmatch(r'[0-9]+', job_id):
+            continue
+        if bucket == 'applied':
+            applied.add(job_id)
+        try:
+            stamp = datetime.fromisoformat(row.get('ts', ''))
+            stamp = stamp.replace(tzinfo=stamp.tzinfo or timezone.utc).timestamp()
+        except (ValueError, TypeError, OverflowError):
+            stamp = float('-inf')
+        if job_id not in latest or stamp >= latest[job_id][0]:
+            latest[job_id] = (stamp, bucket, {**row, 'job_id': job_id})
+    return [row for _, bucket, row in sorted(latest.values(), key=lambda item: item[0], reverse=True)
+            if row.get('manual_form') is True and bucket != 'applied' and row['job_id'] not in applied]
 
 
 def load_tavily_key(key_file: Path | None = None) -> str:
@@ -386,17 +427,52 @@ def job_match_label(value) -> str:
     return "是" if value >= 0.6 else "否" if value <= 0.4 else "不确定"
 
 
-def render_official_md(results: list[dict], now: datetime) -> str:
+def _link(url, title):
+    if _url_parts(url) is None:
+        return '—'
+    target = html.escape(url, quote=False).replace('|', '&#124;')
+    return f'[{_cell(title)}](<{target}>)'
+
+
+def _job_labels(result):
+    sources = result.get('sources') or []
+    jobs = list(dict.fromkeys(f"{s['job']}（{PLATFORM_LABELS.get(s['platform'], s['platform'])}）"
+                             for s in sources if s.get('job')))
+    if not jobs:
+        jobs = list(result.get('jobs', []))
+    return '、'.join(jobs[:3]) + (f'等 {len(jobs)} 个' if len(jobs) > 3 else '') or '—'
+
+
+def render_official_md(results: list[dict], now: datetime, manual_forms=None) -> str:
     """纯渲染；链接只能取候选的原始 URL，不从公司名或标题生成链接。"""
     counts = {status: sum(r["status"] == status for r in results) for status in ("已核验", "待核验", "未找到")}
     cached = sum(bool(r.get("cached")) for r in results)
+    searched = sum(bool(r.get('searched', not r.get('cached'))) for r in results)
+    websites = sum(bool(r['candidates']) for r in results)
+    emails = sum(bool(r.get('emails')) for r in results)
+    neither = sum(not r['candidates'] and not r.get('emails') for r in results)
     lines = ["# 官网投递", "", f"生成时间：{now.isoformat(timespec='seconds')}", "",
-             f"查了 {len(results)} 家（本轮搜索 {len(results) - cached} 家，缓存 {cached} 家）；"
+             f"公司数：{len(results)}｜有官网入口：{websites}｜有投递邮箱：{emails}｜两者皆无：{neither}", "",
+             f"查了 {len(results)} 家（本轮搜索 {searched} 家，缓存 {cached} 家）；"
              + "｜".join(f"{status}：{count}" for status, count in counts.items()), "",
-             "链接均来自搜索结果，投递前请人工确认岗位仍开放。", "",
+             "官网链接均来自搜索结果，投递前请人工确认岗位仍开放。", "",
              "统计按公司计数；同公司可以有两个入口，分别列入对应状态表。"
-             "岗位命中仅判断首个 Boss 岗位；缓存沿用原核验时间，首个岗位变化则记为不确定。", ""]
-    headers = ["公司", "Boss 岗位", "官方入口", "类型", "岗位命中", "HTTP", "核验时间"]
+             "岗位命中仅判断首个岗位；缓存沿用原核验时间，首个岗位变化则记为不确定。", "",
+             "邮件投递建议标题：姓名-学校-岗位-到岗时间（请按 JD 要求）", "",
+             "## 官网/邮箱清单", "",
+             "| 公司 | 对口岗位（平台） | 官网入口 | 投递邮箱 | 平台链接 |",
+             "|---|---|---|---|---|"]
+    for result in sorted(results, key=lambda r: not (r.get('emails') or r['status'] == '已核验')):
+        entrances = '、'.join(_link(c['url'], (c.get('title') or '招聘入口')[:30])
+                             + f"（{_cell(c['status'])}）" for c in result['candidates']) or '—'
+        sources = result.get('sources') or []
+        urls = result.get('boss_urls') or []
+        url = sources[0].get('url', '') if sources else urls[0] if urls else ''
+        cells = [_cell(result['company']), _cell(_job_labels(result)), entrances,
+                 _cell('、'.join(result.get('emails', [])) or '—'), _link(url, '岗位')]
+        lines.append('| ' + ' | '.join(cells) + ' |')
+    lines.append('')
+    headers = ["公司", "对口岗位", "官方入口", "类型", "岗位命中", "HTTP", "核验时间"]
     for status in ("已核验", "待核验"):
         table_headers = headers + (["原因"] if status == "待核验" else [])
         lines.extend([f"## {status}", "", "| " + " | ".join(table_headers) + " |",
@@ -429,13 +505,22 @@ def render_official_md(results: list[dict], now: datetime) -> str:
     if failures:
         lines.extend(["", "## 查询异常", "", "以下结果不完整，未写入本次缓存，可重新运行：", ""])
         lines.extend(f"- {_cell(r['company'])}：{_cell('；'.join(r['errors']))}" for r in failures)
+    lines.extend(['', '## 平台表单待手动投递（应届生）', '',
+                  '| 公司 | 岗位 | Jev 结论(hard/fit) | 链接 |', '|---|---|---|---|'])
+    for row in manual_forms or []:
+        d = (row.get('jev') or {}).get('decision') or {}
+        metric = lambda value: f'{value:.2f}' if isinstance(value, (int, float)) else '—'
+        conclusion = f"{d.get('decision', '—')}（{metric(d.get('hard_ok'))}/{metric(d.get('fit_ev'))}）"
+        lines.append('| ' + ' | '.join([_cell(row.get('company', '')), _cell(row.get('job', '')),
+                                        _cell(conclusion), _link(row.get('url', ''), '岗位')]) + ' |')
     return "\n".join(lines) + "\n"
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="从 Boss 队列补全真实官网招聘入口（只读，不自动投递）")
+    parser = argparse.ArgumentParser(description="从全平台对口岗位整理官网/邮箱清单（只读，不自动投递）")
     parser.add_argument("--company", help="只查询指定公司")
-    parser.add_argument("--job", help="与 --company 配合使用的 Boss 岗位名")
+    parser.add_argument("--job", help="与 --company 配合使用的岗位名")
+    parser.add_argument('--emails-only', action='store_true', help='仅输出日志邮箱、手动表单及 30 天内已缓存官网，不调用 Tavily/Jev')
     parser.add_argument("--limit", type=int, default=20, help="本轮最多新查询的公司数，缓存命中不占额度（默认 20）")
     parser.add_argument("--refresh", action="store_true", help="忽略 30 天缓存，强制重查")
     args = parser.parse_args(argv)
@@ -445,23 +530,32 @@ def main(argv=None) -> int:
         parser.error("--job 需要与 --company 一起使用")
     if args.company is not None and not normalize_company(args.company):
         parser.error("--company 不能为空")
-    tavily_key = load_tavily_key()
-    if not tavily_key:
-        print("缺少 TAVILY_API_KEY：请设置环境变量或 ~/.config/jobhunter/search.env。", file=sys.stderr)
-        return 1
-    jev_key = load_jev_key()
-    if not jev_key:
+    tavily_key = '' if args.emails_only else load_tavily_key()
+    emails_only = args.emails_only or not tavily_key
+    if not tavily_key and not args.emails_only:
+        print('缺少 TAVILY_API_KEY，自动降级为 --emails-only：仅整理日志邮箱和已缓存官网。', file=sys.stderr)
+    jev_key = '' if emails_only else load_jev_key()
+    if not emails_only and not jev_key:
         print("缺少 JEV_API_KEY：请设置环境变量或 ~/.config/jobhunter/jev.env。", file=sys.stderr)
         return 1
     directory = Path(__file__).resolve().parent
-    companies = ([{"company": args.company.strip(), "jobs": [args.job.strip()] if args.job and args.job.strip() else [],
-                   "boss_urls": []}] if args.company is not None else collect_companies(directory))
+    companies = collect_companies(directory)
+    manual_forms = collect_manual_forms(directory)
+    if args.company is not None:
+        companies = [c for c in companies if normalize_company(c['company']) == normalize_company(args.company)] or [
+            dict(company=args.company.strip(), jobs=[], sources=[], emails=[], boss_urls=[])]
+        if args.job and args.job.strip():
+            companies[0]['jobs'] = [args.job.strip()]
+        manual_forms = [r for r in manual_forms if normalize_company(r.get('company', '')) == normalize_company(args.company)]
     now = datetime.now().astimezone()
     cache_file = cache_path(directory, "official-cache.json")
     cache = load_cache(cache_file)
     results, searched, skipped = [], 0, 0
     for company in companies:
-        result = None if args.refresh else get_cached(cache, company, now)
+        result = None if args.refresh and not emails_only else get_cached(cache, company, now)
+        if result is None and emails_only:
+            result = {**company, 'queries': [], 'candidates': [], 'status': '未找到',
+                      'errors': [], 'cached': False, 'searched': False}
         if result is None:
             if searched >= args.limit:
                 skipped += 1
@@ -475,14 +569,15 @@ def main(argv=None) -> int:
         # 即使上游意外回显 key，也不能落盘；URL 含 key 的候选已在搜索层丢弃。
         secrets = (tavily_key, jev_key)
         safe_cache = json.loads(_redact(json.dumps(cache, ensure_ascii=False), secrets))
-        save_cache(cache_file, safe_cache)
+        if not emails_only:
+            save_cache(cache_file, safe_cache)
         path = report_path(directory, "官网投递.md")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_redact(render_official_md(results, now), secrets), encoding="utf-8")
+        path.write_text(_redact(render_official_md(results, now, manual_forms), secrets), encoding="utf-8")
     except (OSError, ValueError):
         print("无法写入官网报告或缓存，请检查目录权限和文件状态。", file=sys.stderr)
         return 1
-    print(f"已生成 官网投递.md：{len(results)} 家，本轮搜索 {searched} 家，缓存 {len(results) - searched} 家。")
+    print(f"已生成 官网投递.md：{len(results)} 家，本轮搜索 {searched} 家，缓存 {sum(bool(r.get('cached')) for r in results)} 家。")
     if skipped:
         print(f"另有 {skipped} 家达到本轮额度，尚未查询；再次运行可继续。")
     if any(result["errors"] for result in results):

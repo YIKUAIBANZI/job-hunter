@@ -137,10 +137,11 @@ def test_collect_logs_deduplicates_merges_and_honors_buckets(tmp_path):
     (tmp_path / 'data' / 'logs' / "boss-bad-bucket-log.json").write_text('{"applied": {}}')
     (tmp_path / 'data' / 'logs' / "lagou-a-log.json").write_text(json.dumps(data))
     rows = official.collect_companies(tmp_path)
-    assert len(rows) == 5
-    assert rows[0] == {"company": "A C M E", "jobs": ["产品", "研发"],
-                       "boss_urls": ["https://boss.example/a", "https://boss.example/b"]}
-    assert {r["company"] for r in rows} == {"A C M E", "review公司", "apply-review", "失败后待投", "待投"}
+    assert len(rows) == 3
+    assert rows[0] == {"company": "A C M E", "jobs": ["产品"], 'emails': [],
+                       'sources': [dict(platform='boss', job='产品', url='https://boss.example/a', bucket='applied')],
+                       "boss_urls": ["https://boss.example/a"]}
+    assert {r["company"] for r in rows} == {"A C M E", "review公司", "apply-review"}
 
 
 def test_tavily_key_env_precedence_fallback_and_missing(monkeypatch, tmp_path, capsys):
@@ -441,7 +442,7 @@ def test_render_pure_tables_links_counts_and_escaping():
     assert "| 是 | 200 |" in rendered and "| 否 | — |" in rendered
     assert "未找到公司 — 已尝试的查询：示例科技 校园招聘 官网 实习" in rendered
     links = [html.unescape(url) for url in re.findall(r"\]\(<([^>]+)>\)", rendered)]
-    assert links == [verified["candidates"][0]["url"], pending["candidates"][0]["url"]]
+    assert links == [verified["candidates"][0]["url"], pending["candidates"][0]["url"]] * 2
     assert "[伪链接](" not in rendered and NOW.isoformat() in rendered
 
 
@@ -526,7 +527,7 @@ def test_cli_failures_not_cached_and_previous_report_replaced(cli, monkeypatch, 
     assert TAVILY_KEY not in stdout + stderr + report
 
 
-@pytest.mark.parametrize("missing", ["tavily", "jev"])
+@pytest.mark.parametrize("missing", ["jev"])
 def test_cli_missing_key_exits_without_writing(cli, monkeypatch, missing, capsys):
     monkeypatch.setattr(official, f"load_{missing}_key", lambda: "")
     assert official.main(["--company", "示例科技"]) == 1
@@ -548,3 +549,91 @@ def test_help_does_not_read_credentials_or_call_network(monkeypatch, capsys):
     assert exc.value.code == 0
     text = capsys.readouterr().out
     assert all(flag in text for flag in ("--company", "--job", "--limit", "--refresh"))
+def write_log(root, platform, data):
+    from shared import log_path
+    path = log_path(root, platform, '深圳')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False))
+
+
+def test_collect_all_platform_sources_emails_and_old_logs(tmp_path):
+    for i, platform in enumerate(official.PLATFORM_LABELS):
+        write_log(tmp_path, platform, {
+            'applied': [{'company': ' A c m e ', 'job': '产品', 'url': f'https://acme.test/{i}',
+                         'emails': ['HR@acme.test', f'jobs{i}@acme.test']}],
+            'review': [{'company': 'acme', 'job': 'Agent'}],
+            'failed': [{'company': '失败公司', 'decision': 'apply'}],
+            'skipped': [{'company': 'acme', 'job': '跳过岗位', 'emails': ['skip@acme.test'], 'decision': 'apply'}]})
+    rows = official.collect_companies(tmp_path)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row['jobs'] == ['产品', 'Agent'] and len(row['sources']) == 10
+    assert {s['platform'] for s in row['sources']} == set(official.PLATFORM_LABELS)
+    assert {s['bucket'] for s in row['sources']} == {'applied', 'review'}
+    assert len(row['emails']) == 6 and row['emails'][0] == 'hr@acme.test'
+    assert 'skip@acme.test' not in row['emails'] and len(row['boss_urls']) == 1
+
+
+@pytest.mark.parametrize('explicit', [True, False])
+def test_emails_only_and_missing_tavily_are_offline(cli, monkeypatch, capsys, explicit):
+    write_log(cli, 'liepin', {'review': [{'company': '示例科技', 'job': '产品实习', 'emails': ['HR@acme.test']}]})
+    monkeypatch.setattr(official, 'load_tavily_key', lambda: pytest.fail('离线不读 Tavily') if explicit else '')
+    monkeypatch.setattr(official, 'load_jev_key', lambda: pytest.fail('离线不读 Jev'))
+    monkeypatch.setattr(official, 'find_official', lambda *a: pytest.fail('禁止搜索'))
+    # 缓存处于有效期，离线输出仍保留原核验时间，不写回。
+    current = datetime.now().astimezone()
+    cached = result(company={'company': '示例科技', 'jobs': ['产品实习'], 'boss_urls': []})
+    path = cli / 'data' / 'cache' / 'official-cache.json'
+    official.save_cache(path, {'示例科技': {'ts': current.isoformat(), 'result': cached}})
+    before = path.read_bytes()
+    assert official.main(['--emails-only', '--refresh'] if explicit else []) == 0
+    text = (cli / 'reports' / '官网投递.md').read_text()
+    assert 'hr@acme.test' in text and '公司数：1｜有官网入口：1｜有投递邮箱：1｜两者皆无：0' in text
+    assert '产品实习（猎聘）' in text and '本轮搜索 0 家，缓存 1 家' in text
+    assert path.read_bytes() == before
+    assert ('自动降级' in capsys.readouterr().err) == (not explicit)
+
+
+def test_emails_only_without_cache_writes_all_companies_ignores_limit(cli, monkeypatch):
+    write_log(cli, 'yupao', {'review': [{'company': '有邮箱', 'job': '产品', 'emails': ['hr@acme.test']},
+                                      {'company': '空入口', 'job': 'Agent'}]})
+    monkeypatch.setattr(official, 'load_jev_key', lambda: pytest.fail('不读 Jev'))
+    assert official.main(['--emails-only', '--limit', '1']) == 0
+    text = (cli / 'reports' / '官网投递.md').read_text()
+    assert '公司数：2｜有官网入口：0｜有投递邮箱：1｜两者皆无：1' in text
+    assert '本轮搜索 0 家，缓存 0 家' in text
+    assert not (cli / 'data' / 'cache' / 'official-cache.json').exists()
+
+
+def test_main_table_sort_labels_limits_and_escape():
+    empty = result([], {'company': '空入口', 'jobs': [], 'boss_urls': []})
+    mail = result([], {'company': '邮箱|[伪]', 'jobs': [], 'boss_urls': [], 'emails': ['hr@acme.test'],
+                       'sources': [dict(platform=p, job=f'岗位{i}|[文本]', url='https://acme.test/job(1)?a=1&b=2', bucket='review')
+                                   for i, p in enumerate(official.PLATFORM_LABELS)]})
+    verified = result(company={'company': '官网', 'jobs': [], 'boss_urls': []})
+    pending = result([candidate(http=None)], {'company': '待核验', 'jobs': [], 'boss_urls': []})
+    rendered = official.render_official_md([empty, mail, pending, verified], NOW)
+    table = rendered.split('## 官网/邮箱清单')[1].split('## 已核验')[0]
+    assert table.index('| 邮箱') < table.index('| 官网 |') < table.index('| 空入口 |')
+    assert '岗位0&#124;&#91;文本&#93;（boss）' in table and '（猎聘）' in table and '（应届生）' in table
+    assert '等 5 个' in table and '岗位3' not in table
+    assert 'mailto:' not in table and 'hr@acme.test' in table
+    assert '[岗位](<https://acme.test/job(1)?a=1&amp;b=2>)' in table
+    assert '邮件投递建议标题：姓名-学校-岗位-到岗时间（请按 JD 要求）' in rendered
+
+
+def test_manual_forms_latest_exclude_applied_and_render_offline(cli):
+    def form(job_id, ts='2026-10-14T12:00:00+08:00', **extra):
+        return dict(job_id=job_id, company='表单公司', job='AI产品', manual_form=True, ts=ts,
+                    url=f'https://q.yingjiesheng.com/jobdetail/{job_id}.html',
+                    jev={'decision': {'decision': 'apply', 'hard_ok': .9, 'fit_ev': .8}}, **extra)
+    write_log(cli, 'yingjiesheng', {'review': [form('1'), form('1', '2026-10-15T12:00:00+08:00'), form('2'), form('3')],
+                                   'applied': [{'job_id': '2'}],
+                                   'skipped': [{'job_id': '3', 'ts': '2026-10-15T12:00:00+08:00'}]})
+    forms = official.collect_manual_forms(cli)
+    assert [r['job_id'] for r in forms] == ['1'] and forms[0]['ts'].startswith('2026-10-15')
+    assert official.main(['--emails-only']) == 0
+    section = (cli / 'reports' / '官网投递.md').read_text().split('## 平台表单待手动投递（应届生）')[1]
+    assert '| 公司 | 岗位 | Jev 结论(hard/fit) | 链接 |' in section
+    assert 'apply（0.90/0.80）' in section and 'jobdetail/1.html' in section
+    assert 'jobdetail/2.html' not in section and 'jobdetail/3.html' not in section

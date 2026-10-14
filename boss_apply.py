@@ -38,6 +38,7 @@ from shared import (
     connect_chrome,
     cooldown_remaining,
     dedup_key,
+    extract_emails,
     is_blacklisted,
     load_applied_index,
     load_config,
@@ -692,6 +693,9 @@ def main():
                         desc_el = page.ele(".job-detail-body") or page.ele(".job-sec-text")
                         if not desc_el:
                             raise RuntimeError("未找到岗位 JD，未发起沟通")
+                        emails = extract_emails(desc_el.text)
+                        if emails:
+                            entry['emails'] = emails
                         jd_text = clean_jd(desc_el.text)
                     finally:
                         if entry.get("status") != "blocked":

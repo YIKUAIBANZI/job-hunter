@@ -375,3 +375,15 @@ def test_applied_index_shares_ids_between_yingjiesheng_and_51job(tmp_path):
         {'applied': [{'platform': 'yingjiesheng', 'job_id': '100000001', 'company': '公司丙', 'job': '产品助理'}]}))
     index = load_applied_index(tmp_path)
     assert {'yingjiesheng:100000001', '51job:100000001'} <= index
+
+
+@pytest.mark.parametrize('text,expected', [
+    ('邮箱：HR＠Acme.TEST； hr@acme.test、jobs@team.cn', ['hr@acme.test', 'jobs@team.cn']),
+    ('noreply@acme.test no-reply@acme.test a@example.com a@foo.example.org icon@2x.png', []),
+    ('first.last+intern@acme.test', ['first.last+intern@acme.test']),
+    (' '.join(f'hr{i}@acme.test' for i in range(8)), [f'hr{i}@acme.test' for i in range(5)]),
+    ('没有邮箱', []), ('', []), (None, []),
+])
+def test_extract_emails(text, expected):
+    from shared import extract_emails
+    assert extract_emails(text) == expected

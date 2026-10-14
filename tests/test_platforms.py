@@ -608,7 +608,7 @@ def test_yjs_next_page_native_click_and_missing_page():
     ({'jobjumptype':'2', 'isxyzapply':'3'}, (False,'skip','已申请（志愿）')),
     ({'jobjumptype':'2', 'isxyzapply':'2'}, (False,'skip','已申请该公司其他职位且已被处理')),
     ({'jobjumptype':'2', 'isxyzapply':'4'}, (False,'review','需替换志愿，请人工处理')),
-    ({'jobjumptype':'2', 'isxyzapply':'5'}, (False,'review','需补充企业要求的信息，请人工处理')),
+    ({'jobjumptype':'2', 'isxyzapply':'5'}, (False,'form','需补充企业要求的信息，请人工处理')),
     ({'jobjumptype':'2'}, (False,'review','志愿状态未知')),
     ({'jobjumptype':'2', 'isxyzapply':'9'}, (False,'review','志愿状态未知')),
     ({'isapply':'0', 'isIncomplete':True}, (False,'review','简历不完整，请先完善')),
@@ -679,7 +679,7 @@ def test_card_platform_state_skips_before_detail_and_jev(tmp_path,monkeypatch,pl
 @pytest.mark.parametrize('state', [
     {'isapply':'1'}, {'isReprintJob':'1'}, {'jobjumptype':'2','isxyzapply':'1'},
     {'jobjumptype':'2','isxyzapply':'2'}, {'jobjumptype':'2','isxyzapply':'3'},
-    {'jobjumptype':'2','isxyzapply':'4'}, {'jobjumptype':'2','isxyzapply':'5'},
+    {'jobjumptype':'2','isxyzapply':'4'},
     {'jobjumptype':'2'}, {'isapply':'0','isIncomplete':True}, {},
 ])
 @pytest.mark.parametrize('dry_run', [False,True])
@@ -1455,3 +1455,89 @@ def test_detail_closed_before_post_submit_rest(tmp_path, monkeypatch):
     assert stats['applied'] == 2
     first = events.index('submit')
     assert events[first + 1] == 'close' and 'rest' in events[first + 2:]
+@pytest.mark.parametrize('platform', ['liepin', '51job', 'yupao'])
+@pytest.mark.parametrize('email', ['', ' 邮箱 HR＠acme.test'])
+def test_runner_extracts_email_during_evaluation(tmp_path, monkeypatch, platform, email):
+    jd = '产品 实习 AI' + email
+    cards = [dict(job_id='123', title='产品实习', company='公司A', url='https://acme.test/job', jd=jd)]
+    adapter = FakeAdapter(cards)
+    adapter.open_detail = lambda c: {**c, 'jd': jd}
+    monkeypatch.setattr(runner, 'submit', lambda *a, **kw: pytest.fail('不应提交'))
+    # 用 keyword 低分记录 skipped，验证日志也不存 JD 原文。
+    parsed = args('--min-score', '100', '--dry-run')
+    stats = runner.execute(platform, parsed, config(tmp_path), adapter, tmp_path, rest=lambda *a: None)
+    entry = load_log(tmp_path / 'data' / 'logs' / f'{platform}-深圳-log.json')['skipped'][0]
+    assert entry.get('emails', []) == (['hr@acme.test'] if email else [])
+    assert ('emails' in entry) == bool(email)
+    assert 'jd' not in entry and stats['skip'] == 1
+
+
+@pytest.mark.parametrize('dry_run', [True, False])
+@pytest.mark.parametrize('conclusion', ['apply', 'review', 'skip'])
+@pytest.mark.parametrize('cached', [False, True])
+@pytest.mark.parametrize('matcher', ['jev', 'llm'])
+@pytest.mark.parametrize('state,tip', [({'isxyzapply': '5'}, ''),
+                                      ({'isapply': '0'}, '需补充企业要求的信息')])
+def test_yjs_form_evaluates_and_never_submits(tmp_path, monkeypatch, dry_run, conclusion, cached, matcher, state, tip):
+    events = []
+    cfg = config(tmp_path)
+    cfg['resume_path'] = 'resume.txt'
+    (tmp_path / 'resume.txt').write_text('测试简历')
+    result = {'decision': {'decision': conclusion, 'reason': 'Jev 原因', 'hard_ok': .8, 'fit_ev': .7}}
+    monkeypatch.setattr(runner.jev, 'load_jev_key', lambda: 'offline')
+    monkeypatch.setattr(runner.llm_match, 'load_llm_key', lambda *a: 'offline')
+    monkeypatch.setattr(runner.llm_match, 'settings_ready', lambda *a: True)
+    monkeypatch.setattr(runner.jev, 'latest_match', lambda *a, **kw: result if cached else None)
+    monkeypatch.setattr(runner.jev, 'title_protected', lambda *a: False)
+    monkeypatch.setattr(runner.jev, 'match_title', lambda *a, **kw: (events.append('title') or False, ''))
+    monkeypatch.setattr(runner.jev, 'match_job', lambda *a, **kw: events.append('job') or result)
+    monkeypatch.setattr(runner, 'submit', lambda *a, **kw: pytest.fail('需表单绝不提交'))
+    adapter = FakeAdapter([dict(job_id='123', title='产品实习', company='公司A', url='https://q.yingjiesheng.com/jobdetail/123.html')])
+    adapter.open_detail = lambda c: {**c, 'jd': '产品 实习 邮箱 hr@acme.test',
+                                      'yjs_state': {'jobid': '123', **state}, 'button_reason': tip}
+    parsed = runner.parse_args({'深圳': '040000'}, ['--job', '产品实习', '--matcher', matcher] + (['--dry-run'] if dry_run else []), platform='yingjiesheng')
+    stats = runner.execute('yingjiesheng', parsed, cfg, adapter, tmp_path, rest=lambda *a: None)
+    bucket = 'skipped' if conclusion == 'skip' else 'review'
+    log = load_log(tmp_path / 'data' / 'logs' / 'yingjiesheng-深圳-log.json')
+    entry = log[bucket][0]
+    if cached and conclusion == 'skip':
+        # 缓存已判跳过：不重开详情、不调 Jev（省详情浏览与模型调用）
+        assert events == [] and 'emails' not in entry
+        assert entry['reason'] == 'Jev 原因' and not entry.get('manual_form')
+        return
+    assert events == (['job'] if cached else ['title', 'job'])
+    assert entry['emails'] == ['hr@acme.test']
+    assert entry['jev'] == result and not log['applied'] and not log['pending']
+    assert stats['skip' if conclusion == 'skip' else 'review'] == 1
+    if conclusion == 'skip':
+        assert entry['reason'] == 'Jev 原因' and not entry.get('manual_form')
+    else:
+        assert entry['reason'] == '[需表单] Jev 原因' and entry['manual_form'] is True
+
+
+@pytest.mark.parametrize('dry_run', [True, False])
+def test_yjs_form_keyword_no_submit(tmp_path, monkeypatch, dry_run):
+    adapter = FakeAdapter([dict(job_id='123', title='产品实习', company='公司A')])
+    adapter.open_detail = lambda c: {**c, 'jd': '产品 实习 AI', 'yjs_state': {'jobid': '123', 'isxyzapply': '5'}}
+    monkeypatch.setattr(runner, 'submit', lambda *a, **kw: pytest.fail('需表单不可提交'))
+    parsed = runner.parse_args({'深圳': '040000'}, ['--job', '产品', '--matcher', 'keyword'] + (['--dry-run'] if dry_run else []), platform='yingjiesheng')
+    assert runner.execute('yingjiesheng', parsed, config(tmp_path), adapter, tmp_path, rest=lambda *a: None)['review'] == 1
+def test_yjs_form_reuses_real_jd_cache_without_network(tmp_path, monkeypatch):
+    from test_jev_match import answers
+    cfg = config(tmp_path)
+    cfg['resume_path'] = 'resume.txt'
+    (tmp_path / 'resume.txt').write_text('测试简历')
+    calls = []
+    monkeypatch.setattr(runner.jev, 'load_jev_key', lambda: 'offline')
+    monkeypatch.setattr(runner.jev, 'call_jev', lambda *a, **kw: calls.append('job') or answers())
+    monkeypatch.setattr(runner.jev, 'match_title', lambda *a, **kw: (False, ''))
+    monkeypatch.setattr(runner, 'submit', lambda *a, **kw: pytest.fail('缓存表单岗位不可提交'))
+    parsed = runner.parse_args({'深圳': '040000'}, ['--job', '产品', '--dry-run'], platform='yingjiesheng')
+    for _ in range(2):
+        adapter = FakeAdapter([dict(job_id='123', title='产品实习', company='公司A')])
+        adapter.open_detail = lambda c: {**c, 'jd': '产品 实习 AI hr@acme.test',
+                                          'yjs_state': {'jobid': '123', 'isxyzapply': '5'}}
+        assert runner.execute('yingjiesheng', parsed, cfg, adapter, tmp_path, rest=lambda *a: None)['review'] == 1
+    assert calls == ['job']
+    entries = load_log(tmp_path / 'data' / 'logs' / 'yingjiesheng-深圳-log.json')['review']
+    assert entries[-1]['cache_hit'] and entries[-1]['manual_form']

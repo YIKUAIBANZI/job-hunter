@@ -9,9 +9,9 @@ from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from official_apply import is_aggregator
+from official_apply import collect_companies, collect_manual_forms, is_aggregator, normalize_company
 
-from shared import cache_path, report_path
+from shared import EMAIL_PATTERN, cache_path, extract_emails, report_path
 
 ROOT = Path(__file__).resolve().parent
 STATES = ('未投', '已投', '笔试/测评', '面试', 'Offer', '结束')
@@ -22,6 +22,8 @@ EXPIRED = '(缓存已过期)'
 def url_key(url) -> str:
     """URL 为主键：协议/域名小写，去查询、片段及末尾斜杠。"""
     parts = urlsplit(url.strip())
+    if parts.scheme.lower() == 'mailto':
+        return 'mailto:' + parts.path.lower()
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(),
                        parts.path.rstrip('/'), '', ''))
 
@@ -32,6 +34,8 @@ def _valid_url(url):
     try:
         parts = urlsplit(url)
         parts.port
+        if parts.scheme == 'mailto':
+            return not (parts.netloc or parts.query or parts.fragment) and bool(EMAIL_PATTERN.fullmatch(parts.path))
         return parts.scheme in ('http', 'https') and bool(parts.hostname) and not (
             parts.username or parts.password)
     except ValueError:
@@ -86,7 +90,7 @@ def _probability(candidate):
     return float(value) if isinstance(value, (int, float)) and math.isfinite(value) else 0
 
 
-def build_rows(cache, previous, manual) -> list[dict]:
+def build_rows(cache, previous, manual, companies=None, manual_forms=None) -> list[dict]:
     """从缓存选入口并回填手工字段；参数不被修改，输出按选取顺序排列。"""
     rows = {}
 
@@ -104,7 +108,7 @@ def build_rows(cache, previous, manual) -> list[dict]:
         rows[key] = row
 
     # 同一归一化公司的多份数据合并，再施加最多两个唯一入口的限制。
-    companies = {}
+    cached_companies = {}
     for entry in cache.values():
         if not isinstance(entry, dict) or not isinstance(entry.get('result'), dict):
             continue
@@ -112,14 +116,14 @@ def build_rows(cache, previous, manual) -> list[dict]:
         company = result.get('company', '')
         if not isinstance(company, str) or not company.strip():
             continue
-        group = companies.setdefault(''.join(company.split()).lower(), [])
+        group = cached_companies.setdefault(normalize_company(company), [])
         jobs = '、'.join(str(job) for job in result.get('jobs', []))
         for candidate in result.get('candidates', []):
             # 旧缓存可能含后来才排除的聚合站，这里再过滤一次
             if (isinstance(candidate, dict) and candidate.get('status') in ('已核验', '待核验')
                     and _valid_url(candidate.get('url')) and not is_aggregator(candidate['url'])):
                 group.append((candidate, company, jobs))
-    for group in companies.values():
+    for group in cached_companies.values():
         seen = set()
         for candidate, company, jobs in sorted(group, key=lambda item: (
                 item[0]['status'] != '已核验', -_probability(item[0]))):
@@ -133,6 +137,18 @@ def build_rows(cache, previous, manual) -> list[dict]:
                      'verification': candidate['status'], 'jobs': jobs})
             if len(seen) == 2:
                 break
+    for company in companies if companies is not None else collect_companies(ROOT):
+        for email in company.get('emails', []):
+            # 只使用日志中的合法投递地址，入口键按小写邮箱保留手工字段。
+            if extract_emails(email) == [email.lower()]:
+                add({'company': company['company'], 'url': 'mailto:' + email.lower(),
+                     'title': email.lower(), 'verification': 'JD邮箱',
+                     'jobs': '、'.join(company.get('jobs', []))})
+    for form in manual_forms if manual_forms is not None else collect_manual_forms(ROOT):
+        if _valid_url(form.get('url')):
+            add({'company': form.get('company', ''), 'url': form['url'],
+                 'title': form.get('job') or '岗位表单', 'verification': '平台表单',
+                 'jobs': form.get('job', '')})
     for item in manual or []:
         # 手动输入为 {company, url} 列表；CLI 校验 URL，纯函数跳过无效入口。
         if _valid_url(item.get('url')):
@@ -196,7 +212,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     manual = [{'company': company.strip(), 'url': url} for company, url in args.add or []]
     if any(not item['company'] or not _valid_url(item['url']) for item in manual):
-        parser.error('--add 需要非空公司名及有效的 HTTP(S) URL')
+        parser.error('--add 需要非空公司名及有效的 HTTP(S) URL 或 mailto:邮箱')
     path = report_path(ROOT, '网申进度.md')
     try:
         cache_file = cache_path(ROOT, 'official-cache.json')

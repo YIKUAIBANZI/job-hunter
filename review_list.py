@@ -90,6 +90,10 @@ def render_review_list(rows, approved) -> str:
             if platform == '51job':
                 checked = '—'
                 reason = '51job 暂不支持批准投递，请在页面手动处理；' + reason
+            elif row.get('manual_form'):
+                # 应届生需填企业表单的岗位：批准投递也点不了，交给用户在平台手动填写
+                checked = '—'
+                reason = '需在平台填写企业表单，请手动投递；' + reason
             values = [checked, platform, row.get('company', ''), row.get('job', ''),
                       metric(d.get('hard_ok')), metric(d.get('fit_ev')),
                       {'0': '投递', '1': '复核', '2': '跳过'}.get(d.get('action'), '—'),
@@ -117,7 +121,8 @@ def approved_review_rows(root, platform, city):
     path = report_path(root, REVIEW_FILE)
     approved = parse_approved(path.read_text(encoding='utf-8')) if path.exists() else set()
     return [r for r in load_review_rows(root, city)
-            if r['platform'] == platform and f"{platform}:{r['job_id']}" in approved]
+            if r['platform'] == platform and f"{platform}:{r['job_id']}" in approved
+            and not r.get('manual_form')]
 
 
 def main(argv=None):

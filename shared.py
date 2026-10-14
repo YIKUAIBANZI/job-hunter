@@ -14,6 +14,30 @@ from jev_match import DEFAULT_PROFILE_TEXT
 BOSS_JOB_ID_PATTERN = r"(?:^|/)job_detail/([A-Za-z0-9_-]+)\.html$"
 
 
+EMAIL_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~@-])"
+    r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*"
+    r"@(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}"
+    r"(?![A-Za-z0-9_@-])"
+)
+
+
+def extract_emails(text) -> list[str]:
+    """提取 JD 邮箱，小写保序去重；过滤通知地址、示例和图片文件名。"""
+    emails = []
+    for match in EMAIL_PATTERN.finditer((text or '').replace('＠', '@')):
+        email = match.group().lower()
+        local, domain = email.split('@')
+        if ('noreply' in local or 'no-reply' in local or 'example.' in domain
+                or domain.rsplit('.', 1)[-1] in ('png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico')):
+            continue
+        if email not in emails:
+            emails.append(email)
+        if len(emails) == 5:
+            break
+    return emails
+
+
 def log_path(root, platform, city) -> Path:
     """岗位日志路径；只计算路径，不创建目录。"""
     return Path(root) / 'data' / 'logs' / f'{platform}-{city}-log.json'

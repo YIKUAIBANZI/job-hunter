@@ -15,7 +15,7 @@ from platform_adapters import (AdapterError, PlatformAdapter, same_job, parse_jo
                                yjs_apply_state, YJS_FILTER_REASON)
 from review_list import approved_review_rows
 from shared import (log_path, cooldown_path, cache_path, queue_path,
-                    connect_chrome, cooldown_remaining, dedup_key, is_blacklisted,
+                    connect_chrome, cooldown_remaining, dedup_key, extract_emails, is_blacklisted,
                     load_applied_index, load_config, load_log, record, save_log, score_jd)
 
 
@@ -120,6 +120,10 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
             raise StopRun(reason)
 
     def decision(entry, name, reason):
+        if entry.get('manual_form') and name != 'skip':
+            name, reason = 'review', '[需表单] ' + reason
+        elif name == 'skip':
+            entry.pop('manual_form', None)
         entry.update(decision=name, reason=reason)
         if name in ('review', 'skip'):
             persist('review' if name == 'review' else 'skipped', entry)
@@ -189,6 +193,10 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                                   'company': card.get('company', ''), 'salary': card.get('salary', ''),
                                   'url': card.get('url', '')}
                 rows.append(entry)
+                if platform == '51job':
+                    emails = extract_emails(card.get('jd', ''))
+                    if emails:
+                        entry['emails'] = emails
                 id_key = f"{platform}:{card['job_id']}"
                 company_key = dedup_key(entry['company'], entry['job']) if entry['company'] else ''
                 if not card['job_id'] or not card['title']:
@@ -235,8 +243,9 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                                 decision(entry, 'skip', why)
                                 continue
                         result = None
-                    # 缓存 apply 真投前仍需打开并核验当前详情，缓存 review/skip 不重开。
-                    need_detail = result is None or (not args.dry_run and effective_decision(result, args.match_policy)['decision'] == 'apply'
+                    # 应届生须读取当前表单状态；其他平台保持缓存 review/skip 不重开。
+                    need_detail = result is None or (platform == 'yingjiesheng'
+                                                     and effective_decision(result, args.match_policy)['decision'] != 'skip') or (not args.dry_run and effective_decision(result, args.match_policy)['decision'] == 'apply'
                                                      and counts['applied'] < args.count)
                     if need_detail:
                         if counts['views'] >= args.max_views:
@@ -256,12 +265,20 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                             continue
                         if platform == 'yingjiesheng':
                             ok, name, reason = yjs_apply_state(detail.get('yjs_state'))
-                            if not ok:
+                            tip = detail.get('button_reason', '')
+                            form_tip = '需补充企业要求的信息' in tip
+                            if name == 'form' or (form_tip and name != 'skip' and reason != '简历不完整，请先完善'):
+                                entry['manual_form'] = True
+                            elif not ok:
                                 decision(entry, name, reason)
                                 continue
-                            if detail.get('button_reason'):
+                            if tip and not entry.get('manual_form'):
                                 decision(entry, 'review', detail['button_reason'])
                                 continue
+                        emails = extract_emails(detail['jd'])
+                        entry.pop('emails', None)
+                        if emails:
+                            entry['emails'] = emails
                         entry['url'] = detail.get('url') or entry['url']
                         entry['detail_verified'] = True
                         entry['button_ready'] = detail.get('button_ready')
@@ -294,7 +311,7 @@ def execute(platform, args, cfg, adapter, root, *, rest=paced_rest):
                         entry['jev'] = result if args.matcher in ('jev', 'llm') else {}
                     d = effective_decision(result, args.match_policy)
                     decision(entry, d['decision'], d['reason'])
-                    if args.dry_run or d['decision'] != 'apply' or counts['applied'] >= args.count:
+                    if args.dry_run or entry['decision'] != 'apply' or counts['applied'] >= args.count:
                         continue
                     if not entry['company']:
                         decision(entry, 'review', '公司身份缺失，无法检查黑名单及跨平台去重')

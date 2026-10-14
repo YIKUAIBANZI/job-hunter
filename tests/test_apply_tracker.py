@@ -217,3 +217,36 @@ def test_build_rows_drops_aggregator_from_stale_cache():
         {'url': 'https://fzzixun.zhiye.com', 'title': '社会招聘', 'status': '已核验', 'official': 0.6}]}}}
     rows = build_rows(cache, {}, [])
     assert [r['url'] for r in rows] == ['https://fzzixun.zhiye.com']
+@pytest.mark.parametrize('url,valid', [('mailto:HR@acme.test', True), ('mailto:a+b@acme.test', True),
+                                      ('mailto:bad', False), ('mailto:a@acme.test?subject=x', False),
+                                      ('mailto:a@acme.test#x', False), ('mailto:a@acme.test,b@acme.test', False)])
+def test_mailto_validation(url, valid):
+    assert tracker._valid_url(url) is valid
+    if valid:
+        assert tracker.url_key(url) == url.lower()
+
+
+def test_mailto_and_form_rows_preserve_user_fields_from_logs(tmp_path):
+    from shared import log_path, save_log
+    url = 'https://q.yingjiesheng.com/jobdetail/123.html'
+    save_log({'review': [dict(company='表单公司', job='产品', emails=['HR@acme.test'], job_id='123',
+                              manual_form=True, url=url)]}, log_path(tmp_path, 'yingjiesheng', '深圳'))
+    rows = tracker.build_rows({}, {}, [])
+    assert [r['verification'] for r in rows] == ['JD邮箱', '平台表单']
+    assert [r['url'] for r in rows] == ['mailto:hr@acme.test', url]
+    for item in rows:
+        item.update(deadline='2026-10-20', status='面试', note='已手填|备注')
+    previous = tracker.parse_tracker(tracker.render_tracker(rows, NOW))
+    assert tracker.build_rows({}, previous, []) == rows
+    path = tmp_path / 'reports' / '网申进度.md'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(tracker.render_tracker(rows, NOW))
+    assert tracker.main([]) == 0
+    rebuilt = list(tracker.parse_tracker(path.read_text()).values())
+    assert rebuilt == rows
+
+
+def test_mailto_rows_also_available_with_cached_website():
+    rows = tracker.build_rows(cache(candidate('campus')), {}, [],
+                              companies=[dict(company='公司A', jobs=['AI产品'], emails=['hr@acme.test'])], manual_forms=[])
+    assert [r['verification'] for r in rows] == ['已核验', 'JD邮箱']

@@ -713,3 +713,12 @@ def test_approved_boss_blocked_stops_before_click(approved_boss, tmp_path):
         h.run()
     assert not h.clicked and (tmp_path / 'data' / 'cooldown' / 'boss-cooldown.json').exists()
     assert h.log()['failed'][-1]['status'] == 'blocked'
+@pytest.mark.parametrize('matcher', ['jev', 'keyword'])
+@pytest.mark.parametrize('jd,emails', [('产品 实习 HR＠acme.test', ['hr@acme.test']), ('产品 实习', [])])
+def test_boss_extracts_jd_emails_without_logging_jd(harness, matcher, jd, emails):
+    h = harness([card('email', jd=jd)])
+    h.run('--matcher', matcher, '--count', '1')
+    entry = h.log()['applied'][0]
+    assert entry.get('emails', []) == emails
+    assert ('emails' in entry) == bool(emails)
+    assert not any(name in entry for name in ('jd', 'jd_text', 'desc'))

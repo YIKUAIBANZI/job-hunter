@@ -78,6 +78,10 @@ python3 config_tool.py check
 
 日跑 `python3 daily.py [--plan daily.json]` 默认 dry-run；只有对应平台与配额已授权才 `--live`。计划关键词必须精确属于 `target_roles`，不扩词；五平台配额与城市由 daily.json 决定，不能误用 default_count。顺序运行、不轮询；读取退出码、`reports/日报.md` 与 `data/runs/<日期>/` 日志，0 不代表配额全部完成。pending 停该平台，超时/风控不重试。
 
-招呼语补发 `boss_greet.py` 默认预览，单独获发送授权才 `--send`。`inbox_report.py` 只读回复，不点击会话/标已读、不发消息；`apply_tracker.py` 只读本地官网缓存，网申由用户手动完成。官网入口发现仍是独立 Jev+搜索流程，不受 JD matcher 配置影响。
+招呼语补发 `boss_greet.py` 默认预览，单独获发送授权才 `--send`。`inbox_report.py` 只读回复，不点击会话/标已读、不发消息；`apply_tracker.py` 只读本地官网缓存和岗位日志，网申由用户手动完成。官网入口发现仍是独立 Jev+搜索流程，不受 JD matcher 配置影响。
+
+官网/邮箱清单用于汇总全平台对口公司，方便用户手动再投官网或 JD 邮箱：运行 `python3 official_apply.py`（有 Tavily/Jev 密钥时搜索官网）或 `python3 official_apply.py --emails-only`（仅日志邮箱及 30 天内已缓存官网，不联网）。缺少 Tavily 密钥自动降级为 emails-only。结果在 `reports/官网投递.md`，运行 `python3 apply_tracker.py` 在 `reports/网申进度.md` 跟踪，保留手填截止日期、状态和备注；邮箱入口为 `mailto:`，核验列为“JD邮箱”。
+
+应届生企业补充信息状态继续做标题/JD 匹配：skip 保留原因，apply/review 记 `[需表单]` review 和 `manual_form: true`；任何模式均不提交。这类岗位按 ID 取最新并排除已投，在官网报告的“平台表单待手动投递（应届生）”和网申进度（核验列“平台表单”）中列出；只能用户去平台填表，不能通过批准队列自动投递。邮件投递建议标题：姓名-学校-岗位-到岗时间（请按 JD 要求），清单不写入用户个人信息。
 
 每轮交付本次新增 applied、pending、复核/跳过、停止原因与证据边界，查看 `reports/队列/<平台>-<城市>-队列.md` 和日志。applied 不证明简历附件已送达、HR 回复或面试；mock 测试不能写成实投。个人配置、简历、模型缓存、日志、密钥和认证目录只留本地，禁止提交；新目录及旧根目录 LLM 缓存均已加入 `.gitignore`。
