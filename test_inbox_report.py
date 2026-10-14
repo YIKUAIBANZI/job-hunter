@@ -302,3 +302,10 @@ def test_help_exits_before_connection(offline, capsys):
         report.main(['--help'])
     assert exc.value.code == 0 and not offline.connections
     assert '--no-liepin' in capsys.readouterr().out
+
+
+def test_system_resume_message_not_counted_as_reply():
+    from inbox_report import classify_boss_item
+    item = {'status': None, 'last_msg': '您的附件简历 Banz_AI_P... 已发送给Boss点击查看附件'}
+    assert classify_boss_item(item) == 'delivered'
+    assert classify_boss_item({'status': None, 'last_msg': '收到感谢投递'}) == 'replied'

@@ -23,6 +23,9 @@ def classify_boss_item(item) -> str:
         return 'unknown'
     status = item.get('status')
     if status is None:
+        # 平台系统消息（如“您的附件简历…已发送给Boss”）也没有状态元素，不算 HR 回复
+        if re.search(r'附件简历.*已发送|已发送给Boss', str(item.get('last_msg') or '')):
+            return 'delivered'
         return 'replied'
     if not isinstance(status, str):
         return 'unknown'
