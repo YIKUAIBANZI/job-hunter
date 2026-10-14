@@ -270,6 +270,9 @@ def load_applied_index(skill_dir: Path | None = None) -> set[str]:
                 job_id = entry.get("job_id") or entry.get("jobId")
                 if job_id and platform in ("boss", "liepin", "yingjiesheng", "51job", "yupao"):
                     index.add(f"{platform}:{job_id}")
+                    # 应届生网与 51job 同属前程无忧，岗位 ID 相同（实测 167341639），互相去重
+                    if platform in ("yingjiesheng", "51job"):
+                        index.add(f"{'51job' if platform == 'yingjiesheng' else 'yingjiesheng'}:{job_id}")
     return index
 
 

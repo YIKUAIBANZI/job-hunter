@@ -170,7 +170,7 @@ def test_yjs_index_namespaces_ids_and_legacy_company_key(tmp_path,bucket):
         {'job_id':'123','company':'公司A','job':'产品经理'},
         {'jobId':'456'},
     ]}))
-    assert load_applied_index(tmp_path)=={'yingjiesheng:123','yingjiesheng:456',dedup_key('公司A','产品经理')}
+    assert load_applied_index(tmp_path)=={'yingjiesheng:123','yingjiesheng:456','51job:123','51job:456',dedup_key('公司A','产品经理')}
 
 
 def test_load_applied_index_excludes_unsubmitted_buckets(tmp_path):
@@ -343,3 +343,12 @@ def test_boss_apply_uses_effective_decision():
     from pathlib import Path
     src = (Path(__file__).parent / "boss_apply.py").read_text()
     assert 'decision = effective_decision(result, args.match_policy)' in src
+
+
+def test_applied_index_shares_ids_between_yingjiesheng_and_51job(tmp_path):
+    import json
+    from shared import load_applied_index
+    (tmp_path / 'yingjiesheng-深圳-log.json').write_text(json.dumps(
+        {'applied': [{'platform': 'yingjiesheng', 'job_id': '167341639', 'company': '九联', 'job': '产品助理'}]}))
+    index = load_applied_index(tmp_path)
+    assert {'yingjiesheng:167341639', '51job:167341639'} <= index

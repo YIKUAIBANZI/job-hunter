@@ -187,7 +187,8 @@ def submit(adapter, card, before_click, *, dry_run=False, timeout=8):
             reason = page_block_reason(tab)
             if reason:
                 return 'blocked', reason, evidence
-            if hasattr(adapter, 'submission_gate_reason'):
+            # 接口已确认成功后出现的弹窗（如成功提示、测评邀请）不再改判
+            if network != 'applied' and hasattr(adapter, 'submission_gate_reason'):
                 reason = adapter.submission_gate_reason()
                 if reason:
                     return 'pending', reason, evidence
@@ -213,7 +214,7 @@ def submit(adapter, card, before_click, *, dry_run=False, timeout=8):
                         other.append(url)
             # 只接受同一岗位的按钮发生成功状态变化；全页出现“成功”不算。
             evidence['ui_after'] = adapter.button_state(card)
-        if hasattr(adapter, 'submission_gate_reason'):
+        if network != 'applied' and hasattr(adapter, 'submission_gate_reason'):
             reason = adapter.submission_gate_reason()
             if reason:
                 return 'pending', reason, evidence

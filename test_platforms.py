@@ -384,11 +384,11 @@ def test_liepin_open_chat_flag_alias_correlates_and_applies():
     assert rt.packet_info(pkt,'1975191697')['correlated'] is False  # 无别名不关联
 
 
-def test_only_liepin_calibrated_and_alias_scoped():
+def test_calibrated_platforms_and_alias_scoped():
     a=adapters.PlatformAdapter.__new__(adapters.PlatformAdapter)
     a.platform='yupao'
     assert a.request_id_aliases('1975191697')==set()
-    assert adapters.CALIBRATED=={'liepin'}
+    assert adapters.CALIBRATED=={'liepin','yingjiesheng'}
 
 
 @pytest.mark.parametrize('url,expected', [
@@ -671,12 +671,12 @@ def test_yjs_post_click_dialog_stays_pending_without_dialog_click(checks):
     assert events[1:]==['persist','click','stop']
 
 
-def test_yjs_uncalibrated_live_gate_before_browser(tmp_path):
-    parsed=runner.parse_args({'深圳':'040000'},['--job','产品经理','--matcher','keyword'],platform='yingjiesheng')
-    adapter=adapters.PlatformAdapter('yingjiesheng',None,parsed,'040000')
-    stats=runner.execute('yingjiesheng',parsed,config(tmp_path),adapter,tmp_path,rest=lambda *a:None)
+def test_yupao_uncalibrated_live_gate_before_browser(tmp_path):
+    parsed=runner.parse_args({'深圳':'shenzhen'},['--job','产品经理','--matcher','keyword'],platform='yupao')
+    adapter=adapters.PlatformAdapter('yupao',None,parsed,'shenzhen')
+    stats=runner.execute('yupao',parsed,config(tmp_path),adapter,tmp_path,rest=lambda *a:None)
     assert '尚未首单校准' in stats['stop_reason'] and stats['views']==0
-    assert 'yingjiesheng' not in adapters.CALIBRATED
+    assert 'yupao' not in adapters.CALIBRATED
 
 
 @pytest.mark.parametrize('state', [{'isapply':'0'}, {'jobjumptype':'2','isxyzapply':'0'}])
@@ -763,7 +763,8 @@ def test_yjs_submit_correlated_network_evidence(checks,monkeypatch):
     assert events[1:3]==['persist','click'] and events[-1]=='stop'
 
 
-def test_yjs_dialog_overrides_received_success_evidence(checks,monkeypatch):
+def test_yjs_dialog_after_confirmed_success_stays_applied(checks,monkeypatch):
+    # 2026-10-14 首单实测：接口两层 status=1 后页面弹出对话框，不应改判为待核验
     events=[]
     tab=YjsTab(events,[yjs_packet({'status':'1','resultbody':{'items':[{'status':'1'}]}})])
     adapter=yjs_adapter(tab);adapter.detail_tab=tab;adapter.yjs_state={'jobid':'123','isapply':'0'}
@@ -776,7 +777,7 @@ def test_yjs_dialog_overrides_received_success_evidence(checks,monkeypatch):
     tab.listen.wait=wait
     ticks=iter(range(1000));monkeypatch.setattr(rt.time,'monotonic',lambda:next(ticks)/100)
     status,reason,evidence=rt.submit(adapter,{'job_id':'123','title':'产品经理'},lambda:events.append('persist'),timeout=.1)
-    assert status=='pending' and '弹窗' in reason and len(evidence['packets'])==1
+    assert status=='applied' and reason=='接口确认' and len(evidence['packets'])==1
     assert events.count('click')==1 and events[-1]=='stop'
 
 
