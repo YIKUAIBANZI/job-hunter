@@ -1,6 +1,15 @@
 # Job Hunter — AI 辅助求职
 
-用本地 Chrome 读取招聘岗位，按简历和偏好筛选，再通过浏览器点击提交并核验。支持 BOSS、猎聘、应届生求职网、51job、鱼泡；不会重放平台内部接口，不处理或绕过验证码。
+用本地 Chrome 读取招聘岗位，按简历和偏好筛选，再通过浏览器点击提交并核验。支持 BOSS、猎聘、应届生求职网、51job、鱼泡，五个平台均已用真实首单校准；不会重放平台内部接口，不处理或绕过验证码。
+
+一轮完整流程：
+
+1. **配置**：`src/config_tool.py` 生成并检查 `config.json`（见[快速开始](#快速开始)）。
+2. **试跑**：各平台入口加 `--dry-run`，或 `src/daily.py` 一次跑完五个平台，产出队列与日报。
+3. **投递**：获授权后去掉 `--dry-run`；Jev 判“推荐”的自动投，判“复核”的进清单。
+4. **人工复核**：`src/review_list.py` 汇总复核岗位，勾选后 `--approved` 只投勾过的。
+5. **官网/邮箱补投**：`src/official_apply.py` 把投过/复核过的公司整理成官网入口和 JD 邮箱清单；应届生需企业表单的岗位也列在这里。
+6. **跟进**：`src/apply_tracker.py` 维护网申进度和截止提醒，`src/inbox_report.py` 只读汇总 HR 回复。
 
 ## 目录结构
 
@@ -38,7 +47,7 @@ jobhunter/
 
 ## 从旧布局迁移
 
-由维护者在项目根目录、首次运行新版前执行。代码不会自动迁移或读取旧根目录日志；先迁移才能保留去重、冷却、批准勾选与缓存。此轮实现未移动任何已有个人数据。
+仅适用于 10-15 之前用旧版（日志、缓存、报告都在根目录）跑过的用户，新用户跳过本节。在项目根目录、首次运行新版前执行。代码不会自动迁移或读取旧根目录日志；先迁移才能保留去重、冷却、批准勾选与缓存。
 
 下面显式使用 Bash，避免 zsh 在 glob 无匹配时报错。不存在的文件跳过；`mv -n` 不覆盖同名目标，若两处已有同名文件或 `data/runs/` 已存在，先人工合并再运行。
 
@@ -68,19 +77,19 @@ done
 SH
 ```
 
-`config.json`、`daily.json`、`resume.*`、`chrome-debug/` 保持原位；`evidence/` 的其他文件保留原位。测试和两份开发文档已由本次代码整理移动，无需混入个人数据迁移命令。
+`config.json`、`daily.json`、`resume.*`、`chrome-debug/` 保持原位；`evidence/` 的其他文件保留原位。
 
 ## 当前能力与边界
 
-BOSS 保留已实测流程，其余平台共用运行器。**离线测试或只读浏览不代表投递成功**，逐平台证据见 [验证记录](data/evidence/platform-validation-2026-10-14.md)。
+BOSS 保留已实测流程，其余平台共用运行器。**离线测试或只读浏览不代表投递成功**；各平台已校准的成功端点见 `src/platform_adapters.py` 的 `VERIFIED_ENDPOINTS` 注释，逐平台证据只留在本地 `data/evidence/`。
 
 五个投递入口支持 `jev/llm/keyword`，默认读取 `config.matcher`（缺省 jev）；`--city` 默认读取 `config.city`（缺省深圳），显式 CLI 参数优先。`--dry-run` 阻止投递和聊天动作，但模型模式仍会请求接口。keyword 可能把销售、研发岗位判高分，也可能因正文出现“资深”误杀实习岗位。
 
 | 平台 | 入口 | 校准状态 |
 |---|---|---|
-| BOSS | `src/boss_apply.py` | 保留已实测流程 |
+| BOSS | `src/boss_apply.py` | 已实测（主力平台） |
 | 猎聘 | `src/liepin_apply.py` | 已校准 |
-| 应届生求职网 `yingjiesheng` | `src/yingjiesheng_apply.py` | 已校准 |
+| 应届生求职网 `yingjiesheng` | `src/yingjiesheng_apply.py` | 已校准（多数岗位需补企业表单，自动投递量很少） |
 | 51job | `src/51job_apply.py` | 已校准 |
 | 鱼泡 | `src/yupao_apply.py` | 已校准（对口岗位少，默认配额 0） |
 
@@ -88,7 +97,7 @@ BOSS 保留已实测流程，其余平台共用运行器。**离线测试或只�
 
 应届生暂不支持 `--job-type/--experience/--degree`，非空参数直接报错，请用关键词 + Jev 硬条件。保持详情间隔 15–30 秒，每 5 个休息 90–180 秒，默认 `--max-views 20`。日志、冷却与缓存分别为 `data/logs/yingjiesheng-<城市>-log.json`、`data/cooldown/yingjiesheng-cooldown.json`、`data/cache/jev-yingjiesheng-cache.json`，均由现有忽略规则覆盖。
 
-51job 的完整 JD 取自搜索页自身请求的 `we.51job.com/api/job/search-pc`，只监听页面请求，不重放接口、不打开详情页。导航前开始监听，原生筛选后取最后一包 `resultbody.job.items`；按卡片 sensorsdata 的 jobId + jobTitle 关联，缺项、标题不一致或 JD 为空进入复核，不调 Jev。已申请岗位跳过；校招岗位（`isFromXyx=True`）交给 `src/yingjiesheng_apply.py`，转载/外跳/过期岗位跳过。投递按钮仍从列表卡片核验，首单校准门禁不变。本阶段仅离线验证。
+51job 的完整 JD 取自搜索页自身请求的 `we.51job.com/api/job/search-pc`，只监听页面请求，不重放接口、不打开详情页。导航前开始监听，原生筛选后取最后一包 `resultbody.job.items`；按卡片 sensorsdata 的 jobId + jobTitle 关联，缺项、标题不一致或 JD 为空进入复核，不调 Jev。已申请岗位跳过；校招岗位（`isFromXyx=True`）交给 `src/yingjiesheng_apply.py`，转载/外跳/过期岗位跳过。投递按钮仍从列表卡片核验，首单校准门禁不变。URL 中的 `pageNum` 不生效，翻页通过原生点击页码 `.el-pager li.number` 完成；偶发翻页后无新数据包时多等一次，仍无则结束翻页。
 
 共同流程包含：
 
@@ -214,7 +223,7 @@ python3 src/daily.py --live                # 仅在已授权的平台与配额�
 
 日报包含各平台本次新增已投、待核验、复核、跳过、状态及日志链接，另列新增已投岗位、复核清单新增 ID 数和回复日报首部的 HR 已回复数。所有计数按平台、分类和岗位 ID 去重；历史 applied 不计，pending 转 applied 只算新增已投，已确认成功的预记不算待核验。平台整体退出码：任一平台风控为 1，其余运行状态为 0；计划/配置启动校验错误为 2。退出码 0 可能包含冷却、未校准或异常，须结合日报查看。
 
-`daily.json`、`data/runs/`、`reports/日报.md` 均已忽略提交。日跑本阶段仅经 mock 子进程与临时日志离线验证，未连接浏览器、未真投。
+`daily.json`、`data/runs/`、`reports/日报.md` 均已忽略提交。日跑已在真实浏览器中试跑（dry-run）验证；`--live` 真投路径目前只有离线测试，首次使用建议先少量配额。
 
 ## 官网/邮箱清单
 
@@ -296,7 +305,7 @@ python3 src/review_list.py --city 深圳  # 仅该城市
 
 `reports/复核清单.md` 按平台分节、按时间倒序，平台+ID 去重取最新记录。重新生成保留仍在清单中的勾选；任意城市日志中已 `applied/pending` 的 ID 自动剔除。旧 BOSS 记录缺少时间时，同 ID 按日志最后一条处理。清单属于个人投递资料，已加入 `.gitignore`；每轮覆盖的 `reports/队列/<平台>-<城市>-队列.md` 仍只用于查看本轮结论。
 
-已批准后可运行以下命令；此处仅说明用法，**本阶段仅离线测试，未实投验证批准路径**：
+已批准后可运行以下命令。**批准路径目前仅应届生实投验证过；BOSS、猎聘、鱼泡的批准路径只有离线测试**，首次使用建议 `--count 1`：
 
 ```bash
 python3 src/boss_apply.py --approved --city 深圳 --count 1
@@ -310,7 +319,7 @@ python3 src/yingjiesheng_apply.py --approved --city 深圳 --count 1
 
 批准仅替代匹配判断：冷却、风控、黑名单、ID/公司去重、详情上限、沟通间隔和每五次成功休息仍生效；BOSS 批准模式拒绝 `--fast/--ignore-cooldown`，批准模式均不接受 `--fill-queue`。提交前先落盘 `pending`，未知结果停止且防重；成功记录 `applied`，原因以 `[人工批准]` 开头，下次生成清单时移除。
 
-BOSS 直接打开日志详情 URL，点击前复核 URL 中的 ID、`.job-banner .name h1`（或 `h1`）与日志标题完全一致，并核对 `a.btn-startchat` 的 `data-url` 前缀与“立即沟通”文本；“继续沟通”记已沟通并跳过。猎聘、鱼泡复用 `same_job`、详情按钮核验和原生提交。未知详情结构进入复核，不点击。**51job 清单批准列为 `—`，`--approved` 直接报错，请在页面手动处理；未校准平台的首单门禁不变。**
+BOSS 直接打开日志详情 URL，点击前复核 URL 中的 ID、`.job-banner .name h1`（或 `h1`）与日志标题完全一致，并核对 `a.btn-startchat` 的 `data-url` 前缀与“立即沟通”文本；“继续沟通”记已沟通并跳过。猎聘、鱼泡复用 `same_job`、详情按钮核验和原生提交。未知详情结构进入复核，不点击。**51job 清单批准列为 `—`，`--approved` 直接报错，请在页面手动处理；应届生 `[需表单]` 行同样为 `—`，需本人去平台填表。未校准平台的首单门禁不变。**
 
 ## 首单校准与结果
 
@@ -368,10 +377,11 @@ python3 src/inbox_report.py --city 深圳 --no-liepin
 
 `--city` 仅选择 `data/logs/boss-<城市>-log.json` 的 applied 记录，不筛选会话。公司去空白、转小写匹配，列表品牌以 `...` 结尾时按前缀关联；品牌与日志公司名称不同可能匹配不到。未匹配标为“非本工具投递”，同公司多岗全部列出，不据此确认回复针对哪个岗位。匹配结果保留 `job`、`applied_at`（日志 `ts`）及 `applied_matches`；页面列表“职务”是招聘者职务，不当成投递岗位。
 
-读取前后检查风控；命中立即退出码 1，仅复用冷却接口写 `data/cooldown/boss-cooldown.json`，不覆盖旧日报或修改投递日志。已有冷却时在连接前退出；读取失败也保留旧日报。本阶段仅通过离线替身验证，实际 DOM、列表滚动与未读状态仍需维护者实机确认。
+读取前后检查风控；命中立即退出码 1，仅复用冷却接口写 `data/cooldown/boss-cooldown.json`，不覆盖旧日报或修改投递日志。已有冷却时在连接前退出；读取失败也保留旧日报。已在真实浏览器中读取验证；平台改版后 DOM 选择器可能失效，届时日报会读不到会话。
 
 ## 代码与验证
 
+- `src/shared.py`：`PROJECT_ROOT` 与日志/冷却/缓存/状态/报告/队列路径函数。
 - `src/platform_runner.py`：匹配、缓存、去重、队列、运行上限、提交状态。
 - `src/config_tool.py`：首次配置、点路径修改、检查与自然语言字段映射。
 - `src/llm_match.py`：OpenAI 兼容接口、JSON 答案校验与概率归一化。
@@ -380,7 +390,9 @@ python3 src/inbox_report.py --city 深圳 --no-liepin
 - `src/review_list.py`：离线复核清单与批准 ID 解析。
 - `src/inbox_report.py`：只读回复日报，纯函数与页面读取分离。
 - 共同运行器的四个平台 `*_apply.py`：保留城市表及 CLI 入口。
-- `src/official_apply.py`：官网入口补全工具；日志、缓存与报告位置遵循新目录规则。
+- `src/official_apply.py`：五平台对口公司的官网入口与 JD 邮箱清单。
+- `src/apply_tracker.py`：离线网申进度表。
+- `src/daily.py`：一键日跑，子进程调用各入口并生成日报。
 
 ```bash
 python3 -m pytest -q
